@@ -6,6 +6,9 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private api: DeepSeekAPI;
     usageRecords: UsageRecord[] = [];
+    private _autoRefreshTimer?: ReturnType<typeof setInterval>;
+    private _autoRefreshOn = false;
+    private _refreshSeconds = 60;
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -35,6 +38,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
                 case 'clearConfig': vscode.commands.executeCommand('deepseek-usage.clearConfig'); break;
                 case 'importCsv': await this._importCsv(); break;
                 case 'exportCsv': await this._exportCsv(); break;
+                case 'toggleAutoRefresh': this._autoRefreshOn = !!msg.on; this._autoRefreshOn ? this._startTimer() : this._stopTimer(); break;
+                case 'setRefreshInterval': this._refreshSeconds = parseInt(msg.seconds, 10) || 60; if (this._autoRefreshOn) { this._stopTimer(); this._startTimer(); } break;
             }
         });
 
@@ -52,6 +57,15 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         }
         // 凭证已配置但用户尚未点击"查询用量"，仍显示欢迎界面但启用按钮
         this._view.webview.postMessage({ command: 'needConfig', hasKey: !!key, hasToken: !!token });
+    }
+
+    private _startTimer(): void {
+        this._stopTimer();
+        this._autoRefreshTimer = setInterval(() => this.refresh(), this._refreshSeconds * 1000);
+    }
+
+    private _stopTimer(): void {
+        if (this._autoRefreshTimer) { clearInterval(this._autoRefreshTimer); this._autoRefreshTimer = undefined; }
     }
 
     async refresh(): Promise<void> {
@@ -85,6 +99,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
                 usage: this.usageRecords,
                 hasKey: !!key,
                 hasToken: !!token,
+                autoRefresh: this._autoRefreshOn,
+                refreshInterval: this._refreshSeconds,
             });
         } catch (err) {
             const msg = (err as any)?.response?.status
@@ -176,6 +192,20 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         hr{border:none;border-top:1px solid var(--vscode-widget-border,rgba(128,128,128,.2));margin:8px 0;}
         .sec{font-size:11px;font-weight:600;opacity:.8;margin-bottom:6px;}
         a{color:var(--vscode-textLink-foreground);}
+        .toggle{display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;user-select:none;}
+        .toggle input{display:none;}
+        .toggle .knob{width:28px;height:16px;border-radius:10px;background:var(--vscode-input-background,rgba(128,128,128,.3));position:relative;transition:.2s;flex-shrink:0;}
+        .toggle .knob::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--vscode-foreground);transition:.2s;}
+        .toggle input:checked+.knob{background:var(--vscode-button-background);}
+        .toggle input:checked+.knob::after{left:14px;}
+        .autoRow{display:flex;align-items:center;gap:8px;font-size:11px;}
+        .autoRow select{
+            background:var(--vscode-input-background);color:var(--vscode-input-foreground);
+            border:1px solid var(--vscode-input-border,var(--vscode-widget-border));padding:2px 4px;border-radius:3px;font-size:11px;
+        }
+        .autoRow select option{
+            background:var(--vscode-input-background);color:var(--vscode-input-foreground);
+        }
     </style>
 </head>
 <body>
@@ -184,6 +214,19 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         <button id="btnImport" class="s">📥 导入CSV</button>
         <button id="btnExport" class="s">📤 导出</button>
         <button id="btnClear" class="s" style="color:var(--vscode-errorForeground)">🗑 清空配置</button>
+        <span style="flex-grow:1;"></span>
+        <label class="toggle" id="autoToggle">
+            <input type="checkbox" id="chkAuto">
+            <span class="knob"></span>
+            <span>自动刷新</span>
+        </label>
+        <select id="selInterval" style="display:none;">
+            <option value="10">10s</option>
+            <option value="60">60s</option>
+            <option value="60">1min</option>
+            <option value="600">10min</option>
+            <option value="3600">1h</option>
+        </select>
     </div>
     <div id="error" class="err" style="display:none"></div>
 
@@ -253,6 +296,14 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         document.getElementById('btnSetKey').addEventListener('click', ()=>vscode.postMessage({command:'setKey'}));
         document.getElementById('btnSetToken').addEventListener('click', ()=>vscode.postMessage({command:'setToken'}));
         document.getElementById('btnQuery').addEventListener('click', ()=>vscode.postMessage({command:'openDashboard'}));
+        document.getElementById('chkAuto').addEventListener('change', function(){
+            const on=this.checked;
+            document.getElementById('selInterval').style.display=on?'inline-block':'none';
+            vscode.postMessage({command:'toggleAutoRefresh',on:on});
+        });
+        document.getElementById('selInterval').addEventListener('change', function(){
+            vscode.postMessage({command:'setRefreshInterval',seconds:this.value});
+        });
 
         function fmt(t){return t>=1e6?(t/1e6).toFixed(1)+'M':t>=1e3?(t/1e3).toFixed(1)+'K':t.toLocaleString();}
 
@@ -339,6 +390,13 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
             }
             if(m.command!=='data')return;
             document.getElementById('error').style.display='none';
+
+            // 同步自动刷新控件状态
+            const chk=document.getElementById('chkAuto');
+            const sel=document.getElementById('selInterval');
+            chk.checked=!!m.autoRefresh;
+            sel.style.display=m.autoRefresh?'inline-block':'none';
+            if(m.refreshInterval)sel.value=String(m.refreshInterval);
 
             const bal=m.balance||[],usage=m.usage||[];
             if(bal.length===0){

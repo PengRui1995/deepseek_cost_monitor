@@ -87,3 +87,35 @@ git add -A && git commit -m "..." && git push
 - **零配置体验**：安装后通过状态栏/欢迎界面引导配置，不需要手动改 settings.json
 - **安全第一**：API Key 和 Token 存 SecretStorage（系统级加密），不在 settings.json 明文存储
 - **欢迎界面流**：配置凭证后不自动进入面板，用户通过"查询用量"按钮主动进入
+
+## 参考项目
+
+- [MiMo Usage Monitor](https://marketplace.visualstudio.com/items?itemName=Buggo404.mimo-usage-monitor) — UI/UX 对标参考
+
+## API 端点详情
+
+| 端点 | 域名 | 认证 | 说明 |
+|------|------|------|------|
+| `GET /user/balance` | api.deepseek.com | API Key (Bearer) | 余额查询 |
+| `GET /api/v0/usage/amount` | platform.deepseek.com | Platform Token (Bearer) | Token 用量 |
+| `GET /api/v0/usage/cost` | platform.deepseek.com | Platform Token (Bearer) | 费用查询 |
+
+Platform Token 获取：浏览器登录 platform.deepseek.com → F12 → Application → Local Storage → `userToken`
+
+## 历史决策
+
+| 决策 | 原因 |
+|------|------|
+| 双凭证体系（API Key + Platform Token） | 余额和用量分属不同 API 域名，认证方式不同 |
+| SecretStorage 存 Key | 安全，避免明文泄漏到 settings.json / git |
+| 余额颜色编码 <2 红 / <10 黄 | 对标 MiMo 的警告阈值 |
+| 配置后不自动进入面板 | 避免半配状态（如只配了 Key 还没配 Token）就加载失败 |
+| ECharts CDN 加载 | 减小 VSIX 体积，加载时需 nonce 放开 CSP |
+
+## 踩坑记录
+
+| 问题 | 解决 |
+|------|------|
+| `/user/usage` 端点 404 | DeepSeek 无公开 Usage API，改用 CSV 导入方案 |
+| CSP 阻止 ECharts CDN | 添加 nonce + `script-src` 白名单 |
+| Platform Token 返回 401 | Token 需从浏览器 LocalStorage 提取（非 API Key） |

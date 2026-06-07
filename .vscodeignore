@@ -7,10 +7,6 @@ node_modules/**
 tsconfig.json
 **/*.map
 **/*.ts
-PRD.md
-findings.md
-progress.md
-task_plan.md
 scripts/**
 package-lock.json
 esbuild.js
