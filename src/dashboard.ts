@@ -33,8 +33,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
             switch (msg.command) {
                 case 'refresh': await this.refresh(); break;
                 case 'openDashboard': await this.refresh(); break;
-                case 'setKey': vscode.commands.executeCommand('deepseek-usage.setApiKey'); break;
                 case 'setToken': vscode.commands.executeCommand('deepseek-usage.setToken'); break;
+                case 'login': vscode.commands.executeCommand('deepseek-usage.loginPlatform'); break;
                 case 'clearConfig': vscode.commands.executeCommand('deepseek-usage.clearConfig'); break;
                 case 'importCsv': await this._importCsv(); break;
                 case 'exportCsv': await this._exportCsv(); break;
@@ -49,14 +49,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     /** 通知 WebView 更新凭证状态（不加载数据，仅刷新欢迎界面按钮） */
     async notifyConfigChanged(): Promise<void> {
         if (!this._view) return;
-        const key = await this.api.getApiKey();
         const token = await this.api.getPlatformToken();
-        if (!key && !token) {
-            this._view.webview.postMessage({ command: 'needConfig', hasKey: false, hasToken: false });
-            return;
-        }
-        // 凭证已配置但用户尚未点击"查询用量"，仍显示欢迎界面但启用按钮
-        this._view.webview.postMessage({ command: 'needConfig', hasKey: !!key, hasToken: !!token });
+        this._view.webview.postMessage({ command: 'needConfig', hasToken: !!token });
     }
 
     private _startTimer(): void {
@@ -71,36 +65,35 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     async refresh(): Promise<void> {
         if (!this._view) return;
 
-        // 检查是否已配置任一种凭证
-        const key = await this.api.getApiKey();
         const token = await this.api.getPlatformToken();
-        if (!key && !token) {
-            this._view.webview.postMessage({ command: 'needConfig', hasKey: false, hasToken: false });
+        if (!token) {
+            this._view.webview.postMessage({ command: 'needConfig', hasToken: false });
             return;
         }
 
         try {
-            const balance = key ? await this.api.getBalance().catch(() => []) : [];
+            // 通过平台 Token 获取余额摘要
+            const summary = await this.api.getUserSummary().catch(() => null);
+            const balance = summary ? this.api.summaryToBalance(summary) : [];
 
-            // 尝试获取用量（需要平台 Token）
-            if (token) {
-                const today = new Date().toISOString().split('T')[0];
-                const usage = await this.api.getUsage(today, today).catch(() => []);
-                if (usage.length > 0) {
-                    const existing = new Map(this.usageRecords.map(r => [`${r.date}-${r.model}`, r]));
-                    for (const u of usage) existing.set(`${u.date}-${u.model}`, u);
-                    this.usageRecords = Array.from(existing.values());
-                }
+            // 获取用量明细
+            const today = new Date().toISOString().split('T')[0];
+            const usage = await this.api.getUsage(today, today).catch(() => []);
+            if (usage.length > 0) {
+                const existing = new Map(this.usageRecords.map(r => [`${r.date}-${r.model}`, r]));
+                for (const u of usage) existing.set(`${u.date}-${u.model}`, u);
+                this.usageRecords = Array.from(existing.values());
             }
 
             this._view.webview.postMessage({
                 command: 'data',
                 balance,
                 usage: this.usageRecords,
-                hasKey: !!key,
-                hasToken: !!token,
+                hasToken: true,
                 autoRefresh: this._autoRefreshOn,
                 refreshInterval: this._refreshSeconds,
+                // 额外摘要信息
+                summary,
             });
         } catch (err) {
             const msg = (err as any)?.response?.status
@@ -234,21 +227,17 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         <div class="empty">
             <p style="font-size:32px;margin-bottom:8px;">🔑</p>
             <p style="font-weight:600;margin-bottom:4px;">欢迎使用 DeepSeek 用量查询</p>
-            <p style="font-size:11px;opacity:.7;margin-bottom:16px;">请至少配置一种凭证后开始使用</p>
+            <p style="font-size:11px;opacity:.7;margin-bottom:16px;">配置平台 Token 后开始使用</p>
             <div style="display:flex;flex-direction:column;gap:8px;align-items:center;">
-                <button id="btnSetKey" style="width:180px;">🔐 设置 API Key</button>
-                <span style="font-size:10px;opacity:.5;">查询余额（推荐）</span>
-                <button id="btnSetToken" style="width:180px;">🛡️ 设置平台 Token</button>
-                <span style="font-size:10px;opacity:.5;">查询用量明细</span>
+                <button id="btnLogin" style="width:180px;">🔑 登录获取 Token</button>
+                <span style="font-size:10px;opacity:.5;">自动提取（推荐）</span>
+                <button id="btnSetToken" style="width:180px;">🛡️ 手动设置 Token</button>
+                <span style="font-size:10px;opacity:.5;">手动粘贴</span>
             </div>
             <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--vscode-widget-border,rgba(128,128,128,.2));">
                 <button id="btnQuery" style="width:200px;padding:6px 16px;font-size:12px;font-weight:600;" disabled>📊 查询用量</button>
-                <p style="font-size:10px;opacity:.5;margin-top:6px;" id="btnQueryHint">请先设置 API Key</p>
+                <p style="font-size:10px;opacity:.5;margin-top:6px;" id="btnQueryHint">请先登录平台获取 Token</p>
             </div>
-            <p style="font-size:10px;opacity:.5;margin-top:16px;">
-                也可以在 VS Code 设置中手动填入<br>
-                <code>deepseekUsage.apiKey</code>
-            </p>
         </div>
     </div>
 
@@ -293,8 +282,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         document.getElementById('btnImport').addEventListener('click', ()=>vscode.postMessage({command:'importCsv'}));
         document.getElementById('btnExport').addEventListener('click', ()=>vscode.postMessage({command:'exportCsv'}));
         document.getElementById('btnClear').addEventListener('click', ()=>vscode.postMessage({command:'clearConfig'}));
-        document.getElementById('btnSetKey').addEventListener('click', ()=>vscode.postMessage({command:'setKey'}));
         document.getElementById('btnSetToken').addEventListener('click', ()=>vscode.postMessage({command:'setToken'}));
+        document.getElementById('btnLogin').addEventListener('click', ()=>vscode.postMessage({command:'login'}));
         document.getElementById('btnQuery').addEventListener('click', ()=>vscode.postMessage({command:'openDashboard'}));
         document.getElementById('chkAuto').addEventListener('change', function(){
             const on=this.checked;
@@ -374,16 +363,15 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
                 document.getElementById('error').style.display='none';
                 document.getElementById('empty').style.display='block';
                 document.getElementById('content').style.display='none';
-                // 根据凭证状态启用/禁用"查询用量"按钮
                 const btnQuery=document.getElementById('btnQuery');
                 const hint=document.getElementById('btnQueryHint');
-                if(m.hasKey||m.hasToken){
+                if(m.hasToken){
                     btnQuery.disabled=false;
                     btnQuery.title='';
                     hint.style.display='none';
                 }else{
                     btnQuery.disabled=true;
-                    btnQuery.title='请先设置 API Key 或平台 Token';
+                    btnQuery.title='请先登录平台获取 Token';
                     hint.style.display='block';
                 }
                 return;

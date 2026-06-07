@@ -8,6 +8,20 @@ export interface BalanceInfo {
     topped_up_balance: string;
 }
 
+/** 平台 Token 获取的用户摘要（包含余额+用量） */
+export interface UserSummary {
+    /** 充值钱包 */
+    normal_wallets: { currency: string; balance: string; token_estimation: string }[];
+    /** 赠送钱包 */
+    bonus_wallets: { currency: string; balance: string; token_estimation: string }[];
+    /** 本月花费 */
+    monthly_costs: { currency: string; amount: string }[];
+    /** 本月 Token 用量 */
+    monthly_token_usage: string;
+    /** 预估可用 Token */
+    total_available_token_estimation: string;
+}
+
 export interface UsageRecord {
     date: string;
     model: string;
@@ -98,6 +112,66 @@ export class DeepSeekAPI {
             return data.balance_infos;
         }
         return Array.isArray(data) ? data : [data];
+    }
+
+    // ========== 平台用户摘要（余额 + 用量概览） ==========
+
+    /**
+     * 通过平台 Token 获取用户摘要（余额 + 用量）
+     * 端点: GET https://platform.deepseek.com/api/v0/users/get_user_summary
+     */
+    async getUserSummary(): Promise<UserSummary | null> {
+        const token = await this.getPlatformToken();
+        if (!token) {
+            _log('未配置 Platform Token，跳过摘要查询');
+            throw new Error('未配置平台 Token');
+        }
+
+        const headers = {
+            'Authorization': `Bearer ${token}`,
+            'User-Agent': 'Mozilla/5.0 Chrome/131.0.0.0',
+            'Referer': 'https://platform.deepseek.com/usage',
+        };
+
+        const res = await this.platformClient.get('/api/v0/users/get_user_summary', { headers });
+        const biz = res.data?.data?.biz_data;
+        if (!biz) throw new Error('摘要数据为空');
+
+        _log(`摘要: 充值${biz.normal_wallets?.[0]?.balance || '0'} + 赠送${biz.bonus_wallets?.[0]?.balance || '0'}, 本月花费${biz.monthly_costs?.[0]?.amount || '0'}`);
+
+        return {
+            normal_wallets: biz.normal_wallets || [],
+            bonus_wallets: biz.bonus_wallets || [],
+            monthly_costs: biz.monthly_costs || [],
+            monthly_token_usage: biz.monthly_token_usage || '0',
+            total_available_token_estimation: biz.total_available_token_estimation || '0',
+        };
+    }
+
+    /** 通过平台摘要转为 BalanceInfo（兼容旧接口） */
+    summaryToBalance(summary: UserSummary): BalanceInfo[] {
+        const result: BalanceInfo[] = [];
+        for (const w of summary.normal_wallets) {
+            const bonus = summary.bonus_wallets.find(b => b.currency === w.currency);
+            result.push({
+                currency: w.currency,
+                total_balance: String((parseFloat(w.balance) + parseFloat(bonus?.balance || '0')).toFixed(6)),
+                topped_up_balance: w.balance,
+                granted_balance: bonus?.balance || '0',
+            });
+        }
+        // bonus only (no normal wallet for this currency)
+        for (const b of summary.bonus_wallets) {
+            if (!summary.normal_wallets.find(w => w.currency === b.currency)) {
+                result.push({
+                    currency: b.currency,
+                    total_balance: b.balance,
+                    topped_up_balance: '0',
+                    granted_balance: b.balance,
+                });
+            }
+        }
+        return result;
     }
 
     // ========== 用量（平台内部 API /api/v0/usage/amount） ==========

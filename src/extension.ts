@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { DeepSeekAPI } from './api';
 import { StatusBarManager } from './statusBar';
 import { DashboardViewProvider } from './dashboard';
+import { extractTokenViaCDP } from './browserAuth';
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('DeepSeek用量查询 已激活');
@@ -74,18 +75,43 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('deepseek-usage.setToken', async () => {
             const token = await vscode.window.showInputBox({
-                prompt: '请输入 platform.deepseek.com 的 Token',
+                prompt: '请输入 DeepSeek 平台 Token（推荐使用"登录获取"命令自动提取）',
                 password: true,
                 ignoreFocusOut: true,
-                placeHolder: '浏览器 F12 → Application → Local Storage → userToken',
+                placeHolder: '粘贴 Token 到此处',
                 validateInput: v => !v?.trim() ? 'Token 不能为空' : null
             });
             if (token) {
                 await api.setPlatformToken(token.trim());
                 vscode.window.showInformationMessage('Platform Token 已保存 ✅');
-                // 不自动进入面板，仅通知欢迎界面更新按钮状态
                 dashboard.notifyConfigChanged();
             }
+        })
+    );
+
+    // 登录平台自动获取 Token（通过 CDP，对标 MiMo）
+    context.subscriptions.push(
+        vscode.commands.registerCommand('deepseek-usage.loginPlatform', async () => {
+            await vscode.window.withProgress(
+                { location: vscode.ProgressLocation.Notification, title: '正在启动浏览器...' },
+                async (progress) => {
+                    try {
+                        progress.report({ message: '请在浏览器中登录 DeepSeek' });
+                        const token = await extractTokenViaCDP();
+                        if (token) {
+                            await api.setPlatformToken(token);
+                            vscode.window.showInformationMessage('✅ Token 已自动获取并保存！');
+                            dashboard.notifyConfigChanged();
+                        } else {
+                            vscode.window.showErrorMessage('未能提取 Token，请尝试手动设置');
+                        }
+                    } catch (err) {
+                        vscode.window.showErrorMessage(
+                            `自动登录失败: ${(err as Error).message || '未知错误'}。请使用"设置平台 Token"手动粘贴`
+                        );
+                    }
+                }
+            );
         })
     );
 
@@ -104,7 +130,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('deepseek-usage.clearConfig', async () => {
             const ok = await vscode.window.showWarningMessage(
-                '确定清空全部配置？（API Key + Platform Token 都将被删除）',
+                '确定清空全部配置？（平台 Token 将被删除）',
                 '确定清空', '取消'
             );
             if (ok === '确定清空') {
@@ -189,14 +215,14 @@ async function _showWelcome(): Promise<void> {
     const choice = await vscode.window.showInformationMessage(
         '👋 欢迎使用 DeepSeek用量查询！',
         { modal: false },
-        '设置 API Key',
-        '设置平台 Token',
+        '登录获取 Token',
+        '手动设置 Token',
         '查看使用说明'
     );
 
-    if (choice === '设置 API Key') {
-        vscode.commands.executeCommand('deepseek-usage.setApiKey');
-    } else if (choice === '设置平台 Token') {
+    if (choice === '登录获取 Token') {
+        vscode.commands.executeCommand('deepseek-usage.loginPlatform');
+    } else if (choice === '手动设置 Token') {
         vscode.commands.executeCommand('deepseek-usage.setToken');
     } else if (choice === '查看使用说明') {
         const readme = vscode.Uri.parse('https://github.com/PengRui1995/deepseek_cost_monitor#readme');
