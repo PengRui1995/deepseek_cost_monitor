@@ -1,0 +1,135 @@
+{
+  "name": "deepseek-usage-monitor",
+  "displayName": "DeepSeek用量查询",
+  "description": "在 VSCode 中实时查看 DeepSeek API 余额与用量，无需登录官网",
+  "version": "0.1.0",
+  "publisher": "deepseek-usage-monitor",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization",
+    "Machine Learning"
+  ],
+  "keywords": [
+    "deepseek",
+    "api",
+    "usage",
+    "monitor",
+    "token",
+    "balance",
+    "用量",
+    "余额"
+  ],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "deepseek-usage.setApiKey",
+        "title": "DeepSeek: 设置 API Key",
+        "icon": "$(key)"
+      },
+      {
+        "command": "deepseek-usage.refresh",
+        "title": "DeepSeek: 刷新余额",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "deepseek-usage.openDashboard",
+        "title": "DeepSeek: 打开用量面板",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "deepseek-usage.clearApiKey",
+        "title": "DeepSeek: 清除 API Key"
+      },
+      {
+        "command": "deepseek-usage.importCsv",
+        "title": "DeepSeek: 导入用量 CSV",
+        "icon": "$(arrow-circle-down)"
+      },
+      {
+        "command": "deepseek-usage.exportCsv",
+        "title": "DeepSeek: 导出用量 CSV",
+        "icon": "$(arrow-circle-up)"
+      },
+      {
+        "command": "deepseek-usage.setToken",
+        "title": "DeepSeek: 设置平台 Token",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "deepseek-usage.clearToken",
+        "title": "DeepSeek: 清除平台 Token"
+      }
+    ],
+    "configuration": {
+      "title": "DeepSeek用量查询",
+      "properties": {
+        "deepseekUsage.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "DeepSeek API Key（建议使用命令设置，加密存储）",
+          "markdownDescription": "DeepSeek API Key。建议使用 `DeepSeek: 设置 API Key` 命令设置，会加密存储到 SecretStorage。"
+        },
+        "deepseekUsage.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用自动刷新余额"
+        },
+        "deepseekUsage.refreshInterval": {
+          "type": "number",
+          "default": 60,
+          "minimum": 10,
+          "maximum": 3600,
+          "description": "自动刷新间隔（秒），默认60秒"
+        },
+        "deepseekUsage.baseUrl": {
+          "type": "string",
+          "default": "https://api.deepseek.com",
+          "description": "DeepSeek API 基础地址（支持自定义代理/转发地址）"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "deepseekUsage",
+          "title": "DeepSeek用量查询",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "deepseekUsage": [
+        {
+          "type": "webview",
+          "id": "deepseekUsage.dashboard",
+          "name": "用量监控"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.100.0",
+    "@types/node": "20.x",
+    "@typescript-eslint/eslint-plugin": "^7.14.0",
+    "@typescript-eslint/parser": "^7.14.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "axios": "^1.7.2"
+  }
+}
