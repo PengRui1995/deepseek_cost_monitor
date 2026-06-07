@@ -15,8 +15,15 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.registerWebviewViewProvider(DashboardViewProvider.viewType, dashboard)
     );
 
-    // === 命令注册 ===
+    // === 首次安装欢迎提示 ===
+    const HAS_SHOWN_WELCOME = 'deepseekUsage.welcomeShown';
+    if (!context.globalState.get<boolean>(HAS_SHOWN_WELCOME)) {
+        context.globalState.update(HAS_SHOWN_WELCOME, true);
+        // 延迟显示，等窗口完全加载
+        setTimeout(() => _showWelcome(), 1500);
+    }
 
+    // === 同步用量数据 ===
     function syncUsage(records: ReturnType<typeof api.parseUsageCsv>) {
         if (records.length > 0) {
             const existing = new Map(statusBar.usageRecords.map(r => [`${r.date}-${r.model}`, r]));
@@ -25,6 +32,8 @@ export function activate(context: vscode.ExtensionContext) {
             dashboard.usageRecords = statusBar.usageRecords;
         }
     }
+
+    // === 命令注册 ===
 
     // 设置 API Key
     context.subscriptions.push(
@@ -40,8 +49,8 @@ export function activate(context: vscode.ExtensionContext) {
             if (key) {
                 await api.setApiKey(key.trim());
                 vscode.window.showInformationMessage('DeepSeek API Key 已保存 ✅');
-                await statusBar.refresh();
-                dashboard.refresh();
+                // 不自动进入面板，仅通知欢迎界面更新按钮状态
+                dashboard.notifyConfigChanged();
             }
         })
     );
@@ -74,8 +83,8 @@ export function activate(context: vscode.ExtensionContext) {
             if (token) {
                 await api.setPlatformToken(token.trim());
                 vscode.window.showInformationMessage('Platform Token 已保存 ✅');
-                await statusBar.refresh();
-                dashboard.refresh();
+                // 不自动进入面板，仅通知欢迎界面更新按钮状态
+                dashboard.notifyConfigChanged();
             }
         })
     );
@@ -91,12 +100,31 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // 清空全部配置（API Key + Platform Token）
+    context.subscriptions.push(
+        vscode.commands.registerCommand('deepseek-usage.clearConfig', async () => {
+            const ok = await vscode.window.showWarningMessage(
+                '确定清空全部配置？（API Key + Platform Token 都将被删除）',
+                '确定清空', '取消'
+            );
+            if (ok === '确定清空') {
+                await api.clearApiKey();
+                await api.clearPlatformToken();
+                statusBar.usageRecords = [];
+                dashboard.usageRecords = [];
+                await statusBar.refresh();
+                dashboard.refresh();
+                vscode.window.showInformationMessage('已清空全部配置 ✅');
+            }
+        })
+    );
+
     // 点击状态栏 → 详情
     context.subscriptions.push(
         vscode.commands.registerCommand('deepseek-usage.showDetail', () => statusBar.showDetail())
     );
 
-    // 刷新
+    // 手动刷新
     context.subscriptions.push(
         vscode.commands.registerCommand('deepseek-usage.refresh', () =>
             vscode.window.withProgress(
@@ -148,9 +176,31 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(statusBar);
-    statusBar.refresh();
+    // 状态栏自动检测凭证并决定是否启动刷新
 }
 
 export function deactivate() {
     console.log('DeepSeek用量查询 已停用');
 }
+
+// ========== 首次安装欢迎提示 ==========
+
+async function _showWelcome(): Promise<void> {
+    const choice = await vscode.window.showInformationMessage(
+        '👋 欢迎使用 DeepSeek用量查询！',
+        { modal: false },
+        '设置 API Key',
+        '设置平台 Token',
+        '查看使用说明'
+    );
+
+    if (choice === '设置 API Key') {
+        vscode.commands.executeCommand('deepseek-usage.setApiKey');
+    } else if (choice === '设置平台 Token') {
+        vscode.commands.executeCommand('deepseek-usage.setToken');
+    } else if (choice === '查看使用说明') {
+        const readme = vscode.Uri.parse('https://github.com/PengRui1995/deepseek_cost_monitor#readme');
+        vscode.env.openExternal(readme);
+    }
+}
+

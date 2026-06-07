@@ -4,3 +4,18 @@ node_modules/
 *.vsix
 .DS_Store
 Thumbs.db
+
+# === 敏感文件（防止泄露 API Key/Token） ===
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# === VS Code 本地配置（可能含敏感设置） ===
+.vscode/settings.json
+
+# === 系统文件 ===
+*.log
+.secretlintrc.json

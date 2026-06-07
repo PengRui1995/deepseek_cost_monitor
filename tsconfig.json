@@ -11,9 +11,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "types": ["node", "vscode"],
-    "declaration": true,
-    "declarationMap": true
+    "types": ["node", "vscode"]
   },
-  "exclude": ["node_modules", ".vscode-test"]
+  "exclude": ["node_modules", ".vscode-test", "out"]
 }

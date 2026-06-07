@@ -36,13 +36,13 @@ export class DeepSeekAPI {
 
         this.apiClient = axios.create({
             baseURL: config.get<string>('baseUrl', 'https://api.deepseek.com'),
-            timeout: 15000,
+            timeout: 8000,
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
         });
 
         this.platformClient = axios.create({
             baseURL: 'https://platform.deepseek.com',
-            timeout: 15000,
+            timeout: 8000,
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
         });
     }
@@ -187,9 +187,11 @@ export class DeepSeekAPI {
 
         } catch (err) {
             if (axios.isAxiosError(err)) {
-                _log(`→ HTTP ${err.response?.status} ${JSON.stringify(err.response?.data || '').slice(0, 300)}`);
+                const status = err.response?.status || 'N/A';
+                const msg = err.response?.data?.error?.message || err.message || '';
+                _log(`→ HTTP ${status} ${msg.slice(0, 200)}`);
             } else {
-                _log(`→ 异常: ${err}`);
+                _log(`→ 网络异常: ${(err as Error).message || '未知错误'}`);
             }
         }
 

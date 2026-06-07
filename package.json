@@ -23,6 +23,18 @@
     "余额"
   ],
   "icon": "media/icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PengRui1995/deepseek_cost_monitor"
+  },
+  "bugs": {
+    "url": "https://github.com/PengRui1995/deepseek_cost_monitor/issues"
+  },
+  "galleryBanner": {
+    "color": "#1a1a2e",
+    "theme": "dark"
+  },
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -66,6 +78,11 @@
       {
         "command": "deepseek-usage.clearToken",
         "title": "DeepSeek: 清除平台 Token"
+      },
+      {
+        "command": "deepseek-usage.clearConfig",
+        "title": "DeepSeek: 清空配置",
+        "icon": "$(trash)"
       }
     ],
     "configuration": {
@@ -74,13 +91,13 @@
         "deepseekUsage.apiKey": {
           "type": "string",
           "default": "",
-          "description": "DeepSeek API Key（建议使用命令设置，加密存储）",
-          "markdownDescription": "DeepSeek API Key。建议使用 `DeepSeek: 设置 API Key` 命令设置，会加密存储到 SecretStorage。"
+          "description": "⚠️ 安全警告：不要在此设置 API Key！请使用 `DeepSeek: 设置 API Key` 命令，会加密存储。此处明文设置可能被提交到 Git。",
+          "markdownDescription": "⚠️ **安全警告**：**强烈不建议**在此直接输入 API Key，此处的值会以**明文**存储在 `settings.json` 中，可能被意外提交到 Git 仓库。请使用 `DeepSeek: 设置 API Key` 命令（`Ctrl+Shift+P`），密钥会加密存储到 VS Code SecretStorage。"
         },
         "deepseekUsage.autoRefresh": {
           "type": "boolean",
-          "default": true,
-          "description": "启用自动刷新余额"
+          "default": false,
+          "description": "启用自动刷新余额（安装后默认关闭，需手动开启）"
         },
         "deepseekUsage.refreshInterval": {
           "type": "number",
@@ -117,15 +134,18 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "tsc": "tsc -p ./",
     "lint": "eslint src --ext ts"
   },
   "devDependencies": {
-    "@types/vscode": "^1.100.0",
     "@types/node": "20.x",
+    "@types/vscode": "^1.100.0",
     "@typescript-eslint/eslint-plugin": "^7.14.0",
     "@typescript-eslint/parser": "^7.14.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.0",
     "eslint": "^8.57.0",
     "typescript": "^5.4.5"
   },

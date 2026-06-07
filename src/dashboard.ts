@@ -29,7 +29,10 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         webviewView.webview.onDidReceiveMessage(async (msg) => {
             switch (msg.command) {
                 case 'refresh': await this.refresh(); break;
+                case 'openDashboard': await this.refresh(); break;
                 case 'setKey': vscode.commands.executeCommand('deepseek-usage.setApiKey'); break;
+                case 'setToken': vscode.commands.executeCommand('deepseek-usage.setToken'); break;
+                case 'clearConfig': vscode.commands.executeCommand('deepseek-usage.clearConfig'); break;
                 case 'importCsv': await this._importCsv(); break;
                 case 'exportCsv': await this._exportCsv(); break;
             }
@@ -38,27 +41,56 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         this.refresh();
     }
 
+    /** 通知 WebView 更新凭证状态（不加载数据，仅刷新欢迎界面按钮） */
+    async notifyConfigChanged(): Promise<void> {
+        if (!this._view) return;
+        const key = await this.api.getApiKey();
+        const token = await this.api.getPlatformToken();
+        if (!key && !token) {
+            this._view.webview.postMessage({ command: 'needConfig', hasKey: false, hasToken: false });
+            return;
+        }
+        // 凭证已配置但用户尚未点击"查询用量"，仍显示欢迎界面但启用按钮
+        this._view.webview.postMessage({ command: 'needConfig', hasKey: !!key, hasToken: !!token });
+    }
+
     async refresh(): Promise<void> {
         if (!this._view) return;
-        try {
-            const balance = await this.api.getBalance().catch(() => []);
 
-            // 尝试获取今日用量（API Key 或 Cookie 方式）
-            const today = new Date().toISOString().split('T')[0];
-            const usage = await this.api.getUsage(today, today).catch(() => []);
-            if (usage.length > 0) {
-                const existing = new Map(this.usageRecords.map(r => [`${r.date}-${r.model}`, r]));
-                for (const u of usage) existing.set(`${u.date}-${u.model}`, u);
-                this.usageRecords = Array.from(existing.values());
+        // 检查是否已配置任一种凭证
+        const key = await this.api.getApiKey();
+        const token = await this.api.getPlatformToken();
+        if (!key && !token) {
+            this._view.webview.postMessage({ command: 'needConfig', hasKey: false, hasToken: false });
+            return;
+        }
+
+        try {
+            const balance = key ? await this.api.getBalance().catch(() => []) : [];
+
+            // 尝试获取用量（需要平台 Token）
+            if (token) {
+                const today = new Date().toISOString().split('T')[0];
+                const usage = await this.api.getUsage(today, today).catch(() => []);
+                if (usage.length > 0) {
+                    const existing = new Map(this.usageRecords.map(r => [`${r.date}-${r.model}`, r]));
+                    for (const u of usage) existing.set(`${u.date}-${u.model}`, u);
+                    this.usageRecords = Array.from(existing.values());
+                }
             }
 
             this._view.webview.postMessage({
                 command: 'data',
                 balance,
-                usage: this.usageRecords
+                usage: this.usageRecords,
+                hasKey: !!key,
+                hasToken: !!token,
             });
         } catch (err) {
-            this._view.webview.postMessage({ command: 'error', message: String(err) });
+            const msg = (err as any)?.response?.status
+                ? `HTTP ${(err as any).response.status}`
+                : (err as Error).message || '未知错误';
+            this._view.webview.postMessage({ command: 'error', message: msg });
         }
     }
 
@@ -151,13 +183,29 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         <button id="btnRefresh">🔄 刷新</button>
         <button id="btnImport" class="s">📥 导入CSV</button>
         <button id="btnExport" class="s">📤 导出</button>
+        <button id="btnClear" class="s" style="color:var(--vscode-errorForeground)">🗑 清空配置</button>
     </div>
     <div id="error" class="err" style="display:none"></div>
 
     <div id="empty" style="display:none">
         <div class="empty">
-            <p>🔑 请先设置 DeepSeek API Key</p>
-            <button id="btnSetKey">设置 API Key</button>
+            <p style="font-size:32px;margin-bottom:8px;">🔑</p>
+            <p style="font-weight:600;margin-bottom:4px;">欢迎使用 DeepSeek 用量查询</p>
+            <p style="font-size:11px;opacity:.7;margin-bottom:16px;">请至少配置一种凭证后开始使用</p>
+            <div style="display:flex;flex-direction:column;gap:8px;align-items:center;">
+                <button id="btnSetKey" style="width:180px;">🔐 设置 API Key</button>
+                <span style="font-size:10px;opacity:.5;">查询余额（推荐）</span>
+                <button id="btnSetToken" style="width:180px;">🛡️ 设置平台 Token</button>
+                <span style="font-size:10px;opacity:.5;">查询用量明细</span>
+            </div>
+            <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--vscode-widget-border,rgba(128,128,128,.2));">
+                <button id="btnQuery" style="width:200px;padding:6px 16px;font-size:12px;font-weight:600;" disabled>📊 查询用量</button>
+                <p style="font-size:10px;opacity:.5;margin-top:6px;" id="btnQueryHint">请先设置 API Key</p>
+            </div>
+            <p style="font-size:10px;opacity:.5;margin-top:16px;">
+                也可以在 VS Code 设置中手动填入<br>
+                <code>deepseekUsage.apiKey</code>
+            </p>
         </div>
     </div>
 
@@ -173,10 +221,12 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         <hr>
         <div class="sec">📊 用量统计 <span style="font-weight:normal;opacity:.6;font-size:10px;">(CSV)</span></div>
         <div class="cards">
-            <div class="card"><div class="cl">今日 Token</div><div class="cv" id="today">-</div></div>
-            <div class="card"><div class="cl">本月 Token</div><div class="cv" id="month">-</div></div>
-            <div class="card"><div class="cl">记录数</div><div class="cv" id="count">-</div></div>
-            <div class="card"><div class="cl">预估费用</div><div class="cv" id="cost">-</div></div>
+            <div class="card"><div class="cl">今日 Token</div><div class="cv" id="todayToken">-</div></div>
+            <div class="card"><div class="cl">今日费用</div><div class="cv" id="todayCost">-</div></div>
+            <div class="card"><div class="cl">本周 Token</div><div class="cv" id="weekToken">-</div></div>
+            <div class="card"><div class="cl">本周费用</div><div class="cv" id="weekCost">-</div></div>
+            <div class="card"><div class="cl">本月 Token</div><div class="cv" id="monthToken">-</div></div>
+            <div class="card"><div class="cl">本月费用</div><div class="cv" id="monthCost">-</div></div>
         </div>
         <div id="chart" class="chart"></div>
         <div id="noData" style="text-align:center;padding:16px;font-size:11px;opacity:.6;">
@@ -195,7 +245,10 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         document.getElementById('btnRefresh').addEventListener('click', ()=>vscode.postMessage({command:'refresh'}));
         document.getElementById('btnImport').addEventListener('click', ()=>vscode.postMessage({command:'importCsv'}));
         document.getElementById('btnExport').addEventListener('click', ()=>vscode.postMessage({command:'exportCsv'}));
+        document.getElementById('btnClear').addEventListener('click', ()=>vscode.postMessage({command:'clearConfig'}));
         document.getElementById('btnSetKey').addEventListener('click', ()=>vscode.postMessage({command:'setKey'}));
+        document.getElementById('btnSetToken').addEventListener('click', ()=>vscode.postMessage({command:'setToken'}));
+        document.getElementById('btnQuery').addEventListener('click', ()=>vscode.postMessage({command:'openDashboard'}));
 
         function fmt(t){return t>=1e6?(t/1e6).toFixed(1)+'M':t>=1e3?(t/1e3).toFixed(1)+'K':t.toLocaleString();}
 
@@ -226,6 +279,24 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
                 document.getElementById('error').style.display='block';
                 document.getElementById('error').textContent=m.message;
             }
+            if(m.command==='needConfig'){
+                document.getElementById('error').style.display='none';
+                document.getElementById('empty').style.display='block';
+                document.getElementById('content').style.display='none';
+                // 根据凭证状态启用/禁用"查询用量"按钮
+                const btnQuery=document.getElementById('btnQuery');
+                const hint=document.getElementById('btnQueryHint');
+                if(m.hasKey||m.hasToken){
+                    btnQuery.disabled=false;
+                    btnQuery.title='';
+                    hint.style.display='none';
+                }else{
+                    btnQuery.disabled=true;
+                    btnQuery.title='请先设置 API Key 或平台 Token';
+                    hint.style.display='block';
+                }
+                return;
+            }
             if(m.command!=='data')return;
             document.getElementById('error').style.display='none';
 
@@ -250,14 +321,29 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
 
             const today=new Date().toISOString().split('T')[0];
             const month=today.slice(0,7);
-            const todayT=usage.filter(u=>u.date===today).reduce((s,u)=>s+u.total_tokens,0);
-            const monthT=usage.filter(u=>u.date.startsWith(month)).reduce((s,u)=>s+u.total_tokens,0);
-            const cst=usage.reduce((s,u)=>s+(u.cost||0),0);
 
-            document.getElementById('today').textContent=fmt(todayT);
-            document.getElementById('month').textContent=fmt(monthT);
-            document.getElementById('count').textContent=usage.length.toLocaleString();
-            document.getElementById('cost').textContent=cst>0?cst.toFixed(4)+' '+cur:'-';
+            // 本周一
+            const d=new Date();const dow=d.getDay();
+            const mon=new Date(d);mon.setDate(d.getDate()-(dow===0?6:dow-1));
+            const monStr=mon.toISOString().split('T')[0];
+
+            const todayU=usage.filter(u=>u.date===today);
+            const weekU=usage.filter(u=>u.date>=monStr);
+            const monthU=usage.filter(u=>u.date.startsWith(month));
+
+            const todayT=todayU.reduce((s,u)=>s+u.total_tokens,0);
+            const todayC=todayU.reduce((s,u)=>s+(u.cost||0),0);
+            const weekT=weekU.reduce((s,u)=>s+u.total_tokens,0);
+            const weekC=weekU.reduce((s,u)=>s+(u.cost||0),0);
+            const monthT=monthU.reduce((s,u)=>s+u.total_tokens,0);
+            const monthC=monthU.reduce((s,u)=>s+(u.cost||0),0);
+
+            document.getElementById('todayToken').textContent=fmt(todayT);
+            document.getElementById('todayCost').textContent=todayC>0?todayC.toFixed(4)+' '+cur:'-';
+            document.getElementById('weekToken').textContent=fmt(weekT);
+            document.getElementById('weekCost').textContent=weekC>0?weekC.toFixed(4)+' '+cur:'-';
+            document.getElementById('monthToken').textContent=fmt(monthT);
+            document.getElementById('monthCost').textContent=monthC>0?monthC.toFixed(4)+' '+cur:'-';
 
             if(usage.length>0){
                 document.getElementById('chart').style.display='block';
