@@ -78,7 +78,7 @@ npm run lint      # ESLint 检查
 每次提交前必须重新编译 VSIX 并同步到 `release/` 目录：
 
 ```bash
-npm run compile && npx vsce package && cp deepseek-usage-monitor-0.1.0.vsix release/
+npm run compile && npx vsce package && cp deepseek-usage-monitor-*.vsix release/
 git add -A && git commit -m "..." && git push
 ```
 
