@@ -73,6 +73,15 @@ npm run watch     # esbuild watch 模式
 npm run lint      # ESLint 检查
 ```
 
+## 发布流程
+
+每次提交前必须重新编译 VSIX 并同步到 `release/` 目录：
+
+```bash
+npm run compile && npx vsce package && cp deepseek-usage-monitor-0.1.0.vsix release/
+git add -A && git commit -m "..." && git push
+```
+
 ## 关键设计原则
 
 - **零配置体验**：安装后通过状态栏/欢迎界面引导配置，不需要手动改 settings.json

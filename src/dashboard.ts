@@ -229,6 +229,10 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
             <div class="card"><div class="cl">本月费用</div><div class="cv" id="monthCost">-</div></div>
         </div>
         <div id="chart" class="chart"></div>
+        <div class="sec" style="margin-top:8px;">📈 本周用量</div>
+        <div id="chartWeek" class="chart"></div>
+        <div class="sec" style="margin-top:8px;">📈 本月用量</div>
+        <div id="chartMonth" class="chart"></div>
         <div id="noData" style="text-align:center;padding:16px;font-size:11px;opacity:.6;">
             暂无用量数据<br>
             <span style="font-size:10px;">
@@ -240,7 +244,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     <script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
-        let chart = null;
+        let chart=null, chartWeek=null, chartMonth=null;
 
         document.getElementById('btnRefresh').addEventListener('click', ()=>vscode.postMessage({command:'refresh'}));
         document.getElementById('btnImport').addEventListener('click', ()=>vscode.postMessage({command:'importCsv'}));
@@ -271,6 +275,42 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
                     data:dates.map(d=>{const i=data.find(r=>r.date===d&&r.model===m);return i?i.total_tokens:0;})
                 }))
             });
+        }
+
+        function _drawLine(domId, inst, dates, values, label){
+            const dom=document.getElementById(domId);
+            if(!dom||typeof echarts==='undefined')return inst;
+            if(inst)inst.dispose();
+            const nc=echarts.init(dom);
+            const tc=getComputedStyle(document.body).color||'#ccc';
+            nc.setOption({
+                tooltip:{trigger:'axis'},
+                grid:{left:'3%',right:'4%',bottom:'3%',top:10,containLabel:true},
+                xAxis:{type:'category',data:dates,axisLabel:{color:tc,fontSize:8}},
+                yAxis:{type:'value',axisLabel:{color:tc,fontSize:8,formatter:v=>v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(0)+'K':v}},
+                series:[{
+                    name:label,type:'line',data:values,
+                    lineStyle:{width:2},itemSize:4,
+                    areaStyle:{opacity:0.08}
+                }]
+            });
+            return nc;
+        }
+
+        function drawWeekChart(usage){
+            const d=new Date();const dow=d.getDay();
+            const mon=new Date(d);mon.setDate(d.getDate()-(dow===0?6:dow-1));
+            const days=[];for(let i=0;i<7;i++){const dt=new Date(mon);dt.setDate(mon.getDate()+i);days.push(dt.toISOString().split('T')[0]);}
+            const values=days.map(dd=>usage.filter(u=>u.date===dd).reduce((s,u)=>s+u.total_tokens,0));
+            chartWeek=_drawLine('chartWeek',chartWeek,days.map(dd=>dd.slice(5)),values,'Token');
+        }
+
+        function drawMonthChart(usage){
+            const now=new Date();const y=now.getFullYear(),m=now.getMonth();
+            const daysInMonth=new Date(y,m+1,0).getDate();
+            const days=[];for(let i=1;i<=daysInMonth;i++){days.push(y+'-'+(String(m+1).padStart(2,'0'))+'-'+(String(i).padStart(2,'0')));}
+            const values=days.map(dd=>usage.filter(u=>u.date===dd).reduce((s,u)=>s+u.total_tokens,0));
+            chartMonth=_drawLine('chartMonth',chartMonth,days.map(dd=>dd.slice(5)),values,'Token');
         }
 
         window.addEventListener('message',e=>{
@@ -347,14 +387,20 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
 
             if(usage.length>0){
                 document.getElementById('chart').style.display='block';
+                document.getElementById('chartWeek').style.display='block';
+                document.getElementById('chartMonth').style.display='block';
                 document.getElementById('noData').style.display='none';
                 drawChart(usage);
+                drawWeekChart(usage);
+                drawMonthChart(usage);
             }else{
                 document.getElementById('chart').style.display='none';
+                document.getElementById('chartWeek').style.display='none';
+                document.getElementById('chartMonth').style.display='none';
                 document.getElementById('noData').style.display='block';
             }
         });
-        window.addEventListener('resize',()=>{if(chart)chart.resize();});
+        window.addEventListener('resize',()=>{if(chart)chart.resize();if(chartWeek)chartWeek.resize();if(chartMonth)chartMonth.resize();});
     </script>
 </body>
 </html>`;
