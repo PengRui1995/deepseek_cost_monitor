@@ -3,6 +3,8 @@ node_modules/
 .vscode-test/
 .DS_Store
 Thumbs.db
+*.vsix           # 编译产物不入库，仅保留 release/ 目录下的发布包
+!release/*.vsix  # release/ 下的发布包纳入版本管理
 
 # === 敏感文件（防止泄露 API Key/Token） ===
 .env
