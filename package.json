@@ -88,6 +88,25 @@
         "command": "deepseek-usage.clearConfig",
         "title": "DeepSeek: 清空配置",
         "icon": "$(trash)"
+      },
+      {
+        "command": "llm-usage.setGLMToken",
+        "title": "GLM: 设置 Token",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "llm-usage.loginGLM",
+        "title": "GLM: 登录获取 Token",
+        "icon": "$(sign-in)"
+      },
+      {
+        "command": "llm-usage.clearGLMToken",
+        "title": "GLM: 清除 Token"
+      },
+      {
+        "command": "llm-usage.switchPlatform",
+        "title": "用量监控: 切换平台",
+        "icon": "$(arrow-swap)"
       }
     ],
     "configuration": {
@@ -147,6 +166,7 @@
   "devDependencies": {
     "@types/node": "20.x",
     "@types/vscode": "^1.100.0",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^7.14.0",
     "@typescript-eslint/parser": "^7.14.0",
     "@vscode/vsce": "^3.9.2",

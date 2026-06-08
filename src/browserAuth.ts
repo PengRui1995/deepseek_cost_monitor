@@ -5,22 +5,22 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import { WebSocket } from 'ws';
+import type { CdpLoginConfig } from './platforms/types';
 
-const LOGIN_URL = 'https://platform.deepseek.com/usage';
 const CDP_PORT = 9229;
 
 /**
- * 通过 CDP (Chrome DevTools Protocol) 自动登录并获取平台 Token
- * 对标 MiMo Usage Monitor 的自动登录方案
+ * 通用 CDP 登录：接受 CdpLoginConfig 参数
+ * 每个平台 Provider 通过 `loginConfig` 提供自己的配置
  */
-export async function extractTokenViaCDP(): Promise<string | null> {
+export async function extractTokenViaCDPWithConfig(config: CdpLoginConfig): Promise<string | null> {
     const browserPath = _findBrowser();
     if (!browserPath) {
         vscode.window.showErrorMessage('未找到 Chrome/Edge 浏览器，请手动设置 Token');
         return null;
     }
 
-    const userDataDir = path.join(os.tmpdir(), 'deepseek-cdp-' + Date.now());
+    const userDataDir = path.join(os.tmpdir(), `llm-cdp-${Date.now()}`);
     fs.mkdirSync(userDataDir, { recursive: true });
 
     const proc = cp.spawn(browserPath, [
@@ -28,34 +28,53 @@ export async function extractTokenViaCDP(): Promise<string | null> {
         '--no-first-run',
         '--no-default-browser-check',
         `--user-data-dir=${userDataDir}`,
-        LOGIN_URL,
+        config.loginUrl,
     ], {
         detached: true,
         stdio: 'ignore',
     });
 
-    // 确保进程在 VS Code 退出时被清理
     proc.unref();
 
     try {
         console.log(`[CDP] 浏览器已启动: ${browserPath}`);
-        // 等待浏览器启动 + CDP 就绪
-        const wsUrl = await _waitForCDP(CDP_PORT, 15000);
+        const wsUrl = await _waitForCDP(CDP_PORT, 15000, config.loginUrl);
         if (!wsUrl) throw new Error('CDP 连接超时，请确保浏览器正常启动');
 
         console.log('[CDP] WebSocket 已连接，等待登录...');
-        const token = await _extractToken(wsUrl, 120000);
+        const token = await _extractTokenGeneric(wsUrl, 120000, config);
 
-        // 清理临时目录
         _rmdir(userDataDir);
         _killBrowser(proc);
-
         return token;
     } catch (err) {
         _rmdir(userDataDir);
         _killBrowser(proc);
         throw err;
     }
+}
+
+/**
+ * DeepSeek 专用 CDP 登录（向后兼容）
+ * 对标 MiMo Usage Monitor 的自动登录方案
+ */
+export async function extractTokenViaCDP(): Promise<string | null> {
+    const config: CdpLoginConfig = {
+        loginUrl: 'https://platform.deepseek.com/usage',
+        credentialSource: 'localStorage',
+        credentialKey: 'userToken',
+        tokenParser: (raw: string): string | null => {
+            try {
+                const parsed = JSON.parse(raw);
+                return typeof parsed === 'string'
+                    ? parsed
+                    : (parsed.value || parsed.token || null);
+            } catch {
+                return raw;
+            }
+        },
+    };
+    return extractTokenViaCDPWithConfig(config);
 }
 
 // ========== 查找浏览器 ==========
@@ -103,13 +122,19 @@ interface CDPMessage {
     params?: any;
 }
 
-async function _waitForCDP(port: number, timeoutMs: number): Promise<string | null> {
+async function _waitForCDP(port: number, timeoutMs: number, loginUrl: string): Promise<string | null> {
+    // 从 loginUrl 中提取域名关键词用于匹配页面
+    const domainHint = new URL(loginUrl).hostname.split('.').slice(-2)[0]; // e.g. 'deepseek', 'bigmodel'
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
         try {
             const data = await _httpGet(`http://localhost:${port}/json`);
             const pages: any[] = JSON.parse(data);
-            const page = pages.find((p: any) => p.type === 'page' && p.url && p.url.includes('deepseek'));
+            const page = pages.find((p: any) =>
+                p.type === 'page' && p.url && (
+                    p.url.includes(domainHint) || p.url.includes(loginUrl.replace(/^https?:\/\//, '').split('/')[0])
+                )
+            );
             if (page?.webSocketDebuggerUrl) {
                 return page.webSocketDebuggerUrl;
             }
@@ -119,8 +144,51 @@ async function _waitForCDP(port: number, timeoutMs: number): Promise<string | nu
     return null;
 }
 
-async function _extractToken(wsUrl: string, timeoutMs: number): Promise<string | null> {
-    return new Promise((resolve, reject) => {
+/** 通用 Token 提取：根据 CdpLoginConfig 从 localStorage 或 cookie 中提取凭证 */
+async function _extractTokenGeneric(wsUrl: string, timeoutMs: number, config: CdpLoginConfig): Promise<string | null> {
+    // 构建注入到浏览器中的 JS 表达式
+    const tokenParserExpr = config.tokenParser
+        ? `(${config.tokenParser.toString()})(raw)`
+        : 'raw';
+
+    // 根据凭证来源构建不同的提取逻辑
+    let extractCode: string;
+    if (config.credentialSource === 'cookie') {
+        // 从 document.cookie 中提取指定名称的 cookie
+        extractCode = `
+            var raw = null;
+            var cookies = document.cookie.split('; ');
+            for (var i = 0; i < cookies.length; i++) {
+                var parts = cookies[i].split('=');
+                if (parts[0] === '${config.credentialKey}') {
+                    raw = decodeURIComponent(parts.slice(1).join('='));
+                    break;
+                }
+            }
+        `;
+    } else {
+        // 从 localStorage 提取
+        extractCode = `
+            var raw = localStorage.getItem('${config.credentialKey}');
+        `;
+    }
+
+    const expression = `(function(){
+        try {
+            var href = window.location.href;
+            ${extractCode}
+            var token = null;
+            if (raw) {
+                try { token = ${tokenParserExpr}; } catch(e) { token = raw; }
+            }
+            return JSON.stringify({url: href, token: token || null});
+        } catch(e) { return JSON.stringify({url: '', token: null, err: e.message}); }
+    })()`;
+
+    // 提取域名用于 Network 请求过滤
+    const domainHost = new URL(config.loginUrl).hostname;
+
+    return new Promise((resolve) => {
         const ws = new WebSocket(wsUrl);
         let msgId = 0;
         const callbacks = new Map<number, (result: any) => void>();
@@ -143,27 +211,14 @@ async function _extractToken(wsUrl: string, timeoutMs: number): Promise<string |
                 finish(null);
             }, timeoutMs);
 
-            // 启用 Network 域——捕获所有 API 请求（用于发现余额端点）
+            // 启用 Network 域——捕获所有 API 请求（用于调试）
             _send(ws, ++msgId, 'Network.enable');
 
-            // 启动轮询：每 2 秒检测一次登录状态
+            // 启动轮询：每 2 秒检测一次 localStorage
             pollTimer = setInterval(() => {
                 const id = ++msgId;
                 _send(ws, id, 'Runtime.evaluate', {
-                    expression: `(function(){
-                        try {
-                            var href = window.location.href;
-                            var raw = localStorage.getItem('userToken');
-                            var token = null;
-                            if (raw) {
-                                try {
-                                    var p = JSON.parse(raw);
-                                    token = typeof p === 'string' ? p : (p.value || p.token || null);
-                                } catch(e) { token = raw; }
-                            }
-                            return JSON.stringify({url: href, token: token || null});
-                        } catch(e) { return JSON.stringify({url: '', token: null, err: e.message}); }
-                    })()`,
+                    expression,
                     returnByValue: true,
                 });
                 callbacks.set(id, (result) => {
@@ -174,7 +229,7 @@ async function _extractToken(wsUrl: string, timeoutMs: number): Promise<string |
                             return;
                         }
                         const info = JSON.parse(value);
-                        console.log(`[CDP] 轮询: url=${(info.url||'').slice(0,60)}, token=${info.token ? '***有***' : '无'}`);
+                        console.log(`[CDP] 轮询: url=${(info.url || '').slice(0, 60)}, token=${info.token ? '***有***' : '无'}`);
                         if (info.token) {
                             finish(info.token);
                         }
@@ -196,13 +251,16 @@ async function _extractToken(wsUrl: string, timeoutMs: number): Promise<string |
             if (msg.method === 'Network.requestWillBeSent') {
                 const req = msg.params?.request || {};
                 const url: string = req.url || '';
-                if (url.includes('platform.deepseek.com') && (url.includes('/api/') || url.includes('/auth-api/'))) {
+                if (url.includes(domainHost) && (url.includes('/api/') || url.includes('/auth-api/'))) {
                     console.log(`[CDP] ${req.method || 'GET'} ${url.replace(/^https?:\/\/[^\/]+/, '')}`);
                 }
             }
         });
 
-        ws.on('error', (err) => { finish(null); console.log(`[CDP] WS错误: ${err.message}`); });
+        ws.on('error', (err) => {
+            finish(null);
+            console.log(`[CDP] WS错误: ${err.message}`);
+        });
         ws.on('close', () => { finish(null); });
     });
 }

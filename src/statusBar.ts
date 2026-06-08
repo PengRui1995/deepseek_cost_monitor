@@ -1,43 +1,60 @@
 import * as vscode from 'vscode';
-import { DeepSeekAPI, BalanceInfo, UsageRecord, UserSummary } from './api';
+import { PlatformProvider, BalanceInfo, UsageRecord, UserSummary } from './platforms/types';
 
 enum Level { Normal, Low, Critical }
 
 export class StatusBarManager implements vscode.Disposable {
     private item: vscode.StatusBarItem;
-    private api: DeepSeekAPI;
+    private provider: PlatformProvider;
     private timer?: NodeJS.Timeout;
     private _summary?: UserSummary;
     usageRecords: UsageRecord[] = [];
 
-    constructor(context: vscode.ExtensionContext, api: DeepSeekAPI) {
-        this.api = api;
+    constructor(context: vscode.ExtensionContext, provider: PlatformProvider) {
+        this.provider = provider;
         this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
         this.item.command = 'deepseek-usage.showDetail';
-        this.item.text = '$(pulse) DeepSeek';
-        this.item.tooltip = 'DeepSeek用量查询';
+        this._applyProviderLabel();
         this.item.show();
         this._startAutoRefresh();
+    }
+
+    /** 切换平台 Provider */
+    setProvider(provider: PlatformProvider): void {
+        this.provider = provider;
+        this.usageRecords = [];
+        this._summary = undefined;
+        if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
+        this._applyProviderLabel();
+        this._startAutoRefresh();
+        this.refresh();
+    }
+
+    private _applyProviderLabel(): void {
+        const prefix = this.provider.statusBarPrefix;
+        this.item.text = `$(pulse) ${prefix}`;
+        this.item.tooltip = `${this.provider.displayName}用量查询`;
     }
 
     // ========== 刷新 ==========
 
     async refresh(): Promise<void> {
+        const prefix = this.provider.statusBarPrefix;
         try {
-            const token = await this.api.getPlatformToken();
-            if (!token) {
-                this.item.text = '$(pulse) DeepSeek: 未配置';
+            const configured = await this.provider.isConfigured();
+            if (!configured) {
+                this.item.text = `$(pulse) ${prefix}: 未配置`;
                 this.item.backgroundColor = undefined;
                 return;
             }
 
-            const summary = await this.api.getUserSummary();
-            this._summary = summary;
-            const balance = this.api.summaryToBalance(summary);
+            const summary = await this.provider.getUserSummary();
+            this._summary = summary ?? undefined;
+            const balance = await this.provider.getBalance().catch(() => [] as BalanceInfo[]);
 
             // 获取今日用量
             const today = new Date().toISOString().split('T')[0];
-            const usage = await this.api.getUsage(today, today).catch(() => []);
+            const usage = await this.provider.getUsage(today, today).catch(() => []);
 
             if (usage.length > 0) {
                 const map = new Map(this.usageRecords.map(r => [`${r.date}-${r.model}`, r]));
@@ -48,7 +65,7 @@ export class StatusBarManager implements vscode.Disposable {
             this._update(balance);
 
         } catch {
-            this.item.text = '$(error) DeepSeek: 查询失败';
+            this.item.text = `$(error) ${prefix}: 查询失败`;
             this.item.backgroundColor = undefined;
         }
     }
@@ -56,10 +73,11 @@ export class StatusBarManager implements vscode.Disposable {
     // ========== 点击弹窗 ==========
 
     async showDetail(): Promise<void> {
-        const token = await this.api.getPlatformToken();
-        if (!token) {
+        const configured = await this.provider.isConfigured();
+        const name = this.provider.displayName;
+        if (!configured) {
             const a = await vscode.window.showInformationMessage(
-                'DeepSeek — 未配置', '登录获取 Token', '手动设置 Token', '取消'
+                `${name} — 未配置`, '登录获取 Token', '手动设置 Token', '取消'
             );
             if (a === '登录获取 Token') vscode.commands.executeCommand('deepseek-usage.loginPlatform');
             if (a === '手动设置 Token') vscode.commands.executeCommand('deepseek-usage.setToken');
@@ -67,16 +85,16 @@ export class StatusBarManager implements vscode.Disposable {
         }
 
         try {
-            const summary = await this.api.getUserSummary();
-            this._summary = summary;
-            const balance = this.api.summaryToBalance(summary);
+            const summary = await this.provider.getUserSummary();
+            this._summary = summary ?? undefined;
+            const balance = await this.provider.getBalance().catch(() => [] as BalanceInfo[]);
             this._update(balance);
 
             const totalBal = balance.reduce((s: number, b: BalanceInfo) => s + parseFloat(b.total_balance || '0'), 0);
             const toppedUp = balance.reduce((s: number, b: BalanceInfo) => s + parseFloat(b.topped_up_balance || '0'), 0);
             const granted = balance.reduce((s: number, b: BalanceInfo) => s + parseFloat(b.granted_balance || '0'), 0);
-            const currency = balance[0]?.currency || 'CNY';
-            const monthCost = summary.monthly_costs?.reduce((s, c) => s + parseFloat(c.amount || '0'), 0) || 0;
+            const currency = balance[0]?.currency || this.provider.currencyUnit;
+            const monthCost = summary?.monthly_costs?.reduce((s, c) => s + parseFloat(c.amount || '0'), 0) || 0;
 
             const today = new Date().toISOString().split('T')[0];
             const month = today.slice(0, 7);
@@ -89,19 +107,20 @@ export class StatusBarManager implements vscode.Disposable {
             const lines = [
                 `💰 余额: ¥${totalBal.toFixed(2)}（充值${toppedUp.toFixed(2)} + 赠送${granted.toFixed(2)}）`,
             ];
-            if (parseInt(summary.monthly_token_usage) > 0) {
-                lines.push(`📅 本月用量: ${this._fmt(parseInt(summary.monthly_token_usage))} Token`);
+            const monthlyTokenUsage = parseInt(summary?.monthly_token_usage || '0');
+            if (monthlyTokenUsage > 0) {
+                lines.push(`📅 本月用量: ${this._fmt(monthlyTokenUsage)} Token`);
                 if (monthCost > 0) lines.push(`💵 本月费用: ¥${monthCost.toFixed(4)}`);
             }
             if (this.usageRecords.length > 0) {
                 lines.push(`📈 今日明细: ${this._fmt(todayTokens)} Token`);
                 if (todayCost > 0) lines.push(`💵 今日费用: ¥${todayCost.toFixed(4)}`);
-            } else if (parseInt(summary.monthly_token_usage) === 0) {
+            } else if (monthlyTokenUsage === 0) {
                 lines.push('⚠️ 暂无用量数据');
             }
 
             await vscode.window.showInformationMessage(
-                `DeepSeek: ¥${totalBal.toFixed(2)}`,
+                `${name}: ¥${totalBal.toFixed(2)}`,
                 { modal: false, detail: lines.filter(Boolean).join(' | ') },
                 '刷新', '打开面板', '导入CSV'
             ).then(a => {
@@ -121,14 +140,18 @@ export class StatusBarManager implements vscode.Disposable {
     // ========== 内部 ==========
 
     private _update(balance: BalanceInfo[]): void {
+        const prefix = this.provider.statusBarPrefix;
+        const thresholds = this.provider.warningThresholds;
         if (balance.length === 0) {
-            this.item.text = '$(pulse) DeepSeek: 无数据';
+            this.item.text = `$(pulse) ${prefix}: 无数据`;
             this.item.backgroundColor = undefined;
             return;
         }
 
         const totalBal = balance.reduce((s: number, b: BalanceInfo) => s + parseFloat(b.total_balance || '0'), 0);
-        const level = totalBal < 2 ? Level.Critical : totalBal < 10 ? Level.Low : Level.Normal;
+        const level = totalBal < thresholds.critical ? Level.Critical
+            : totalBal < thresholds.low ? Level.Low
+            : Level.Normal;
 
         // 今日用量
         const today = new Date().toISOString().split('T')[0];
@@ -136,7 +159,7 @@ export class StatusBarManager implements vscode.Disposable {
         const todayTokens = todayU.reduce((s, u) => s + u.total_tokens, 0);
         const todayCost = todayU.reduce((s, u) => s + (u.cost || 0), 0);
 
-        // 拼接状态栏文本: DS: ¥余额 | Token/费用
+        // 拼接状态栏文本
         let extra = '';
         if (todayTokens > 0) {
             extra += ` | ${this._fmt(todayTokens)}T`;
@@ -146,15 +169,15 @@ export class StatusBarManager implements vscode.Disposable {
         switch (level) {
             case Level.Critical:
                 this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
-                this.item.text = `$(error) DS: ¥${totalBal.toFixed(2)}${extra}`;
+                this.item.text = `$(error) ${prefix}: ¥${totalBal.toFixed(2)}${extra}`;
                 break;
             case Level.Low:
                 this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-                this.item.text = `$(warning) DS: ¥${totalBal.toFixed(2)}${extra}`;
+                this.item.text = `$(warning) ${prefix}: ¥${totalBal.toFixed(2)}${extra}`;
                 break;
             default:
                 this.item.backgroundColor = undefined;
-                this.item.text = `$(pulse) DS: ¥${totalBal.toFixed(2)}${extra}`;
+                this.item.text = `$(pulse) ${prefix}: ¥${totalBal.toFixed(2)}${extra}`;
         }
 
         const toppedUp = parseFloat(balance[0].topped_up_balance || '0');
@@ -168,13 +191,14 @@ export class StatusBarManager implements vscode.Disposable {
     }
 
     private async _startAutoRefresh(): Promise<void> {
-        // 检查是否有平台 Token，没有则不启动
-        const token = await this.api.getPlatformToken();
-        if (!token) {
-            this.item.text = '$(pulse) DeepSeek: 点击配置';
-            this.item.tooltip = '未配置平台 Token，点击设置';
+        const prefix = this.provider.statusBarPrefix;
+        // 检查是否有平台凭证，没有则不启动
+        const configured = await this.provider.isConfigured();
+        if (!configured) {
+            this.item.text = `$(pulse) ${prefix}: 点击配置`;
+            this.item.tooltip = '未配置凭证，点击设置';
             this.item.command = 'deepseek-usage.showDetail';
-            return; // 不启动自动刷新
+            return;
         }
 
         const config = vscode.workspace.getConfiguration('deepseekUsage');
@@ -188,7 +212,9 @@ export class StatusBarManager implements vscode.Disposable {
     }
 
     _fmt(t: number): string {
-        return t >= 1000000 ? `${(t / 1000000).toFixed(1)}M` : t >= 1000 ? `${(t / 1000).toFixed(1)}K` : t.toLocaleString();
+        return t >= 1000000 ? `${(t / 1000000).toFixed(1)}M`
+            : t >= 1000 ? `${(t / 1000).toFixed(1)}K`
+            : t.toLocaleString();
     }
 
     dispose(): void {

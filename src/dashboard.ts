@@ -1,20 +1,39 @@
 import * as vscode from 'vscode';
-import { DeepSeekAPI, BalanceInfo, UsageRecord } from './api';
+import { PlatformProvider, BalanceInfo, UsageRecord } from './platforms/types';
+
+/** 平台概要信息（发送给 WebView） */
+export interface PlatformMeta {
+    id: string;
+    displayName: string;
+    loginCommand: string;       // 登录命令 ID
+    setTokenCommand: string;     // 手动设置命令 ID
+}
 
 export class DashboardViewProvider implements vscode.WebviewViewProvider {
     static readonly viewType = 'deepseekUsage.dashboard';
     private _view?: vscode.WebviewView;
-    private api: DeepSeekAPI;
+    private provider: PlatformProvider;
     usageRecords: UsageRecord[] = [];
     private _autoRefreshTimer?: ReturnType<typeof setInterval>;
     private _autoRefreshOn = false;
     private _refreshSeconds = 60;
+    /** 所有可用平台列表（用于 WebView 选择器） */
+    private _platforms: PlatformMeta[] = [];
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
-        api: DeepSeekAPI
+        provider: PlatformProvider,
+        platforms: PlatformMeta[]
     ) {
-        this.api = api;
+        this.provider = provider;
+        this._platforms = platforms;
+    }
+
+    /** 切换平台 Provider（无需重建 WebView） */
+    setProvider(provider: PlatformProvider): void {
+        this.provider = provider;
+        this.usageRecords = [];
+        this.refresh();
     }
 
     resolveWebviewView(
@@ -33,9 +52,16 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
             switch (msg.command) {
                 case 'refresh': await this.refresh(); break;
                 case 'openDashboard': await this.refresh(); break;
-                case 'setToken': vscode.commands.executeCommand('deepseek-usage.setToken'); break;
-                case 'login': vscode.commands.executeCommand('deepseek-usage.loginPlatform'); break;
+                case 'setToken':
+                    vscode.commands.executeCommand(this._getMeta().setTokenCommand);
+                    break;
+                case 'login':
+                    vscode.commands.executeCommand(this._getMeta().loginCommand);
+                    break;
                 case 'clearConfig': vscode.commands.executeCommand('deepseek-usage.clearConfig'); break;
+                case 'switchPlatform':
+                    vscode.commands.executeCommand('llm-usage.switchToPlatform', msg.platformId);
+                    break;
                 case 'importCsv': await this._importCsv(); break;
                 case 'exportCsv': await this._exportCsv(); break;
                 case 'toggleAutoRefresh': this._autoRefreshOn = !!msg.on; this._autoRefreshOn ? this._startTimer() : this._stopTimer(); break;
@@ -46,11 +72,38 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         this.refresh();
     }
 
-    /** 通知 WebView 更新凭证状态（不加载数据，仅刷新欢迎界面按钮） */
+    /** 通知 WebView 更新凭证状态 */
     async notifyConfigChanged(): Promise<void> {
         if (!this._view) return;
-        const token = await this.api.getPlatformToken();
-        this._view.webview.postMessage({ command: 'needConfig', hasToken: !!token });
+        const configured = await this.provider.isConfigured();
+        this._view.webview.postMessage({
+            command: 'needConfig',
+            hasToken: configured,
+            ...this._platformContext(),
+        });
+    }
+
+    /** 通知 WebView 平台已切换 */
+    notifyPlatformChanged(): void {
+        if (!this._view) return;
+        this._view.webview.postMessage({
+            command: 'platformChanged',
+            ...this._platformContext(),
+        });
+    }
+
+    private _getMeta(): PlatformMeta {
+        return this._platforms.find(p => p.id === this.provider.id)
+            || this._platforms[0];
+    }
+
+    private _platformContext() {
+        return {
+            platformId: this.provider.id,
+            displayName: this.provider.displayName,
+            currencyUnit: this.provider.currencyUnit,
+            platforms: this._platforms,
+        };
     }
 
     private _startTimer(): void {
@@ -65,25 +118,26 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     async refresh(): Promise<void> {
         if (!this._view) return;
 
-        const token = await this.api.getPlatformToken();
-        if (!token) {
-            this._view.webview.postMessage({ command: 'needConfig', hasToken: false });
+        const configured = await this.provider.isConfigured();
+        if (!configured) {
+            this._view.webview.postMessage({
+                command: 'needConfig',
+                hasToken: false,
+                ...this._platformContext(),
+            });
             return;
         }
 
         try {
-            // 通过平台 Token 获取余额摘要
-            const summary = await this.api.getUserSummary().catch(() => null);
-            const balance = summary ? this.api.summaryToBalance(summary) : [];
-
-            // 获取用量明细
+            const balance = await this.provider.getBalance().catch(() => [] as BalanceInfo[]);
             const today = new Date().toISOString().split('T')[0];
-            const usage = await this.api.getUsage(today, today).catch(() => []);
+            const usage = await this.provider.getUsage(today, today).catch(() => []);
             if (usage.length > 0) {
                 const existing = new Map(this.usageRecords.map(r => [`${r.date}-${r.model}`, r]));
                 for (const u of usage) existing.set(`${u.date}-${u.model}`, u);
                 this.usageRecords = Array.from(existing.values());
             }
+            const summary = await this.provider.getUserSummary().catch(() => null);
 
             this._view.webview.postMessage({
                 command: 'data',
@@ -92,8 +146,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
                 hasToken: true,
                 autoRefresh: this._autoRefreshOn,
                 refreshInterval: this._refreshSeconds,
-                // 额外摘要信息
                 summary,
+                ...this._platformContext(),
             });
         } catch (err) {
             const msg = (err as any)?.response?.status
@@ -107,14 +161,14 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         const uris = await vscode.window.showOpenDialog({
             canSelectMany: false,
             filters: { 'CSV': ['csv'] },
-            title: '导入 DeepSeek 用量 CSV'
+            title: `导入 ${this.provider.displayName} 用量 CSV`
         });
         if (!uris || uris.length === 0) return;
         try {
             const data = await vscode.workspace.fs.readFile(uris[0]);
-            const records = this.api.parseUsageCsv(Buffer.from(data).toString('utf-8'));
-            if (records.length === 0) {
-                vscode.window.showWarningMessage('CSV 解析失败，请使用 DeepSeek 官方导出的文件');
+            const records = this.provider.parseUsageCsv(Buffer.from(data).toString('utf-8'));
+            if (!records.length) {
+                vscode.window.showWarningMessage(`CSV 解析失败，请使用 ${this.provider.displayName} 官方导出的文件`);
                 return;
             }
             this.usageRecords = records;
@@ -133,7 +187,11 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         const h = ['date', 'model', 'input_tokens', 'output_tokens', 'total_tokens', 'cost'];
         const rows = this.usageRecords.map(u => [u.date, u.model, u.input_tokens, u.output_tokens, u.total_tokens, u.cost].join(','));
         const csv = [h.join(','), ...rows].join('\n');
-        const uri = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file('deepseek-usage.csv'), filters: { 'CSV': ['csv'] } });
+        const defaultFile = `${this.provider.id}-usage.csv`;
+        const uri = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file(defaultFile),
+            filters: { 'CSV': ['csv'] }
+        });
         if (uri) {
             await vscode.workspace.fs.writeFile(uri, Buffer.from(csv, 'utf-8'));
             vscode.window.showInformationMessage('已导出');
@@ -158,7 +216,14 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
             color:var(--vscode-foreground);
             background:var(--vscode-sideBar-background);
         }
-        .row{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;}
+        .row{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;align-items:center;}
+        .platform-select{
+            background:var(--vscode-dropdown-background);
+            color:var(--vscode-dropdown-foreground);
+            border:1px solid var(--vscode-dropdown-border);
+            padding:3px 6px;border-radius:3px;font-size:11px;
+            max-width:110px;
+        }
         button{
             background:var(--vscode-button-background);
             color:var(--vscode-button-foreground);
@@ -191,22 +256,15 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         .toggle .knob::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--vscode-foreground);transition:.2s;}
         .toggle input:checked+.knob{background:var(--vscode-button-background);}
         .toggle input:checked+.knob::after{left:14px;}
-        .autoRow{display:flex;align-items:center;gap:8px;font-size:11px;}
-        .autoRow select{
-            background:var(--vscode-input-background);color:var(--vscode-input-foreground);
-            border:1px solid var(--vscode-input-border,var(--vscode-widget-border));padding:2px 4px;border-radius:3px;font-size:11px;
-        }
-        .autoRow select option{
-            background:var(--vscode-input-background);color:var(--vscode-input-foreground);
-        }
     </style>
 </head>
 <body>
     <div class="row">
+        <select id="selPlatform" class="platform-select"></select>
         <button id="btnRefresh">🔄 刷新</button>
-        <button id="btnImport" class="s">📥 导入CSV</button>
+        <button id="btnImport" class="s">📥 导入</button>
         <button id="btnExport" class="s">📤 导出</button>
-        <button id="btnClear" class="s" style="color:var(--vscode-errorForeground)">🗑 清空配置</button>
+        <button id="btnClear" class="s" style="color:var(--vscode-errorForeground)">🗑</button>
         <span style="flex-grow:1;"></span>
         <label class="toggle" id="autoToggle">
             <input type="checkbox" id="chkAuto">
@@ -226,8 +284,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     <div id="empty" style="display:none">
         <div class="empty">
             <p style="font-size:32px;margin-bottom:8px;">🔑</p>
-            <p style="font-weight:600;margin-bottom:4px;">欢迎使用 DeepSeek 用量查询</p>
-            <p style="font-size:11px;opacity:.7;margin-bottom:16px;">配置平台 Token 后开始使用</p>
+            <p style="font-weight:600;margin-bottom:4px;">欢迎使用 <span id="welcomeName">-</span> 用量查询</p>
+            <p style="font-size:11px;opacity:.7;margin-bottom:16px;">配置凭证后开始使用</p>
             <div style="display:flex;flex-direction:column;gap:8px;align-items:center;">
                 <button id="btnLogin" style="width:180px;">🔑 登录获取 Token</button>
                 <span style="font-size:10px;opacity:.5;">自动提取（推荐）</span>
@@ -251,7 +309,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         </div>
 
         <hr>
-        <div class="sec">📊 用量统计 <span style="font-weight:normal;opacity:.6;font-size:10px;">(CSV)</span></div>
+        <div class="sec">📊 用量统计 <span style="font-weight:normal;opacity:.6;font-size:10px;">(CSV / API)</span></div>
         <div class="cards">
             <div class="card"><div class="cl">今日 Token</div><div class="cv" id="todayToken">-</div></div>
             <div class="card"><div class="cl">今日费用</div><div class="cv" id="todayCost">-</div></div>
@@ -267,16 +325,47 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         <div id="chartMonth" class="chart"></div>
         <div id="noData" style="text-align:center;padding:16px;font-size:11px;opacity:.6;">
             暂无用量数据<br>
-            <span style="font-size:10px;">
-                前往 <a href="https://platform.deepseek.com/usage">DeepSeek Usage</a> 导出CSV
-            </span>
+            <span style="font-size:10px;">请先导入 CSV 或配置凭证</span>
         </div>
     </div>
 
     <script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
+        let CUR = 'CNY';
         let chart=null, chartWeek=null, chartMonth=null;
+        let currentPlatformId = '';
+        let platformMeta = {};
+
+        // ---- 平台选择器 ----
+
+        const selPlatform = document.getElementById('selPlatform');
+        selPlatform.addEventListener('change', function() {
+            if (this.value && this.value !== currentPlatformId) {
+                vscode.postMessage({command:'switchPlatform', platformId: this.value});
+            }
+        });
+
+        function buildPlatformSelect(platforms, activeId) {
+            selPlatform.innerHTML = '';
+            (platforms||[]).forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.id;
+                opt.textContent = p.displayName;
+                if (p.id === activeId) opt.selected = true;
+                selPlatform.appendChild(opt);
+            });
+            currentPlatformId = activeId;
+            // 缓存平台元数据
+            platformMeta = {};
+            (platforms||[]).forEach(p => { platformMeta[p.id] = p; });
+        }
+
+        function getCurrentMeta() {
+            return platformMeta[currentPlatformId] || {};
+        }
+
+        // ---- 事件绑定 ----
 
         document.getElementById('btnRefresh').addEventListener('click', ()=>vscode.postMessage({command:'refresh'}));
         document.getElementById('btnImport').addEventListener('click', ()=>vscode.postMessage({command:'importCsv'}));
@@ -294,11 +383,13 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({command:'setRefreshInterval',seconds:this.value});
         });
 
+        // ---- 图表渲染 ----
+
         function fmt(t){return t>=1e6?(t/1e6).toFixed(1)+'M':t>=1e3?(t/1e3).toFixed(1)+'K':t.toLocaleString();}
 
         function drawChart(data){
             const dom=document.getElementById('chart');
-            if(!dom||typeof echarts==='undefined')return;
+            if(!dom||typeof echarts=='undefined')return;
             if(chart)chart.dispose();
             chart=echarts.init(dom);
             const dates=[...new Set(data.map(d=>d.date))].sort();
@@ -319,7 +410,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
 
         function _drawLine(domId, inst, dates, values, label){
             const dom=document.getElementById(domId);
-            if(!dom||typeof echarts==='undefined')return inst;
+            if(!dom||typeof echarts=='undefined')return inst;
             if(inst)inst.dispose();
             const nc=echarts.init(dom);
             const tc=getComputedStyle(document.body).color||'#ccc';
@@ -353,100 +444,122 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
             chartMonth=_drawLine('chartMonth',chartMonth,days.map(dd=>dd.slice(5)),values,'Token');
         }
 
-        window.addEventListener('message',e=>{
-            const m=e.data;
-            if(m.command==='error'){
-                document.getElementById('error').style.display='block';
-                document.getElementById('error').textContent=m.message;
+        // ---- 消息处理 ----
+
+        function applyPlatformInfo(m) {
+            if (m.platforms) buildPlatformSelect(m.platforms, m.platformId);
+            if (m.displayName) {
+                document.getElementById('welcomeName').textContent = m.displayName;
             }
-            if(m.command==='needConfig'){
-                document.getElementById('error').style.display='none';
-                document.getElementById('empty').style.display='block';
-                document.getElementById('content').style.display='none';
-                const btnQuery=document.getElementById('btnQuery');
-                const hint=document.getElementById('btnQueryHint');
-                if(m.hasToken){
-                    btnQuery.disabled=false;
-                    btnQuery.title='';
-                    hint.style.display='none';
-                }else{
-                    btnQuery.disabled=true;
-                    btnQuery.title='请先登录平台获取 Token';
-                    hint.style.display='block';
+            if (m.currencyUnit) CUR = m.currencyUnit;
+        }
+
+        window.addEventListener('message', e => {
+            const m = e.data;
+
+            // 平台切换事件（不重绘数据，仅更新 UI）
+            if (m.command === 'platformChanged') {
+                applyPlatformInfo(m);
+                return;
+            }
+
+            if (m.command === 'error') {
+                applyPlatformInfo(m);
+                document.getElementById('error').style.display = 'block';
+                document.getElementById('error').textContent = m.message;
+            }
+            if (m.command === 'needConfig') {
+                applyPlatformInfo(m);
+                document.getElementById('error').style.display = 'none';
+                document.getElementById('empty').style.display = 'block';
+                document.getElementById('content').style.display = 'none';
+                const btnQuery = document.getElementById('btnQuery');
+                const hint = document.getElementById('btnQueryHint');
+                if (m.hasToken) {
+                    btnQuery.disabled = false;
+                    btnQuery.title = '';
+                    hint.style.display = 'none';
+                } else {
+                    btnQuery.disabled = true;
+                    btnQuery.title = '请先登录平台获取 Token';
+                    hint.style.display = 'block';
                 }
                 return;
             }
-            if(m.command!=='data')return;
-            document.getElementById('error').style.display='none';
+            if (m.command !== 'data') return;
 
-            // 同步自动刷新控件状态
-            const chk=document.getElementById('chkAuto');
-            const sel=document.getElementById('selInterval');
-            chk.checked=!!m.autoRefresh;
-            sel.style.display=m.autoRefresh?'inline-block':'none';
-            if(m.refreshInterval)sel.value=String(m.refreshInterval);
+            applyPlatformInfo(m);
+            document.getElementById('error').style.display = 'none';
 
-            const bal=m.balance||[],usage=m.usage||[];
-            if(bal.length===0){
-                document.getElementById('empty').style.display='block';
-                document.getElementById('content').style.display='none';
+            const chk = document.getElementById('chkAuto');
+            const sel = document.getElementById('selInterval');
+            chk.checked = !!m.autoRefresh;
+            sel.style.display = m.autoRefresh ? 'inline-block' : 'none';
+            if (m.refreshInterval) sel.value = String(m.refreshInterval);
+
+            const bal = m.balance || [], usage = m.usage || [];
+            if (bal.length === 0) {
+                document.getElementById('empty').style.display = 'block';
+                document.getElementById('content').style.display = 'none';
                 return;
             }
-            document.getElementById('empty').style.display='none';
-            document.getElementById('content').style.display='block';
+            document.getElementById('empty').style.display = 'none';
+            document.getElementById('content').style.display = 'block';
 
-            const tb=bal.reduce((s,b)=>s+parseFloat(b.total_balance||0),0);
-            const tu=bal.reduce((s,b)=>s+parseFloat(b.topped_up_balance||0),0);
-            const tg=bal.reduce((s,b)=>s+parseFloat(b.granted_balance||0),0);
-            const cur=bal[0]?.currency||'CNY';
+            const tb = bal.reduce((s, b) => s + parseFloat(b.total_balance || 0), 0);
+            const tu = bal.reduce((s, b) => s + parseFloat(b.topped_up_balance || 0), 0);
+            const tg = bal.reduce((s, b) => s + parseFloat(b.granted_balance || 0), 0);
 
-            document.getElementById('totalBal').textContent=tb.toFixed(2)+' '+cur;
-            document.getElementById('toppedUp').textContent=tu.toFixed(2)+' '+cur;
-            document.getElementById('granted').textContent=tg.toFixed(2)+' '+cur;
-            document.getElementById('status').textContent=tb>0?'✅ 可用':'⚠️ 余额不足';
+            document.getElementById('totalBal').textContent = tb.toFixed(2) + ' ' + CUR;
+            document.getElementById('toppedUp').textContent = tu.toFixed(2) + ' ' + CUR;
+            document.getElementById('granted').textContent = tg.toFixed(2) + ' ' + CUR;
+            document.getElementById('status').textContent = tb > 0 ? '✅ 可用' : '⚠️ 余额不足';
 
-            const today=new Date().toISOString().split('T')[0];
-            const month=today.slice(0,7);
+            const today = new Date().toISOString().split('T')[0];
+            const month = today.slice(0, 7);
 
-            // 本周一
-            const d=new Date();const dow=d.getDay();
-            const mon=new Date(d);mon.setDate(d.getDate()-(dow===0?6:dow-1));
-            const monStr=mon.toISOString().split('T')[0];
+            const d = new Date(); const dow = d.getDay();
+            const mon = new Date(d); mon.setDate(d.getDate() - (dow === 0 ? 6 : dow - 1));
+            const monStr = mon.toISOString().split('T')[0];
 
-            const todayU=usage.filter(u=>u.date===today);
-            const weekU=usage.filter(u=>u.date>=monStr);
-            const monthU=usage.filter(u=>u.date.startsWith(month));
+            const todayU = usage.filter(u => u.date === today);
+            const weekU = usage.filter(u => u.date >= monStr);
+            const monthU = usage.filter(u => u.date.startsWith(month));
 
-            const todayT=todayU.reduce((s,u)=>s+u.total_tokens,0);
-            const todayC=todayU.reduce((s,u)=>s+(u.cost||0),0);
-            const weekT=weekU.reduce((s,u)=>s+u.total_tokens,0);
-            const weekC=weekU.reduce((s,u)=>s+(u.cost||0),0);
-            const monthT=monthU.reduce((s,u)=>s+u.total_tokens,0);
-            const monthC=monthU.reduce((s,u)=>s+(u.cost||0),0);
+            const todayT = todayU.reduce((s, u) => s + u.total_tokens, 0);
+            const todayC = todayU.reduce((s, u) => s + (u.cost || 0), 0);
+            const weekT = weekU.reduce((s, u) => s + u.total_tokens, 0);
+            const weekC = weekU.reduce((s, u) => s + (u.cost || 0), 0);
+            const monthT = monthU.reduce((s, u) => s + u.total_tokens, 0);
+            const monthC = monthU.reduce((s, u) => s + (u.cost || 0), 0);
 
-            document.getElementById('todayToken').textContent=fmt(todayT);
-            document.getElementById('todayCost').textContent=todayC>0?todayC.toFixed(4)+' '+cur:'-';
-            document.getElementById('weekToken').textContent=fmt(weekT);
-            document.getElementById('weekCost').textContent=weekC>0?weekC.toFixed(4)+' '+cur:'-';
-            document.getElementById('monthToken').textContent=fmt(monthT);
-            document.getElementById('monthCost').textContent=monthC>0?monthC.toFixed(4)+' '+cur:'-';
+            document.getElementById('todayToken').textContent = fmt(todayT);
+            document.getElementById('todayCost').textContent = todayC > 0 ? todayC.toFixed(4) + ' ' + CUR : '-';
+            document.getElementById('weekToken').textContent = fmt(weekT);
+            document.getElementById('weekCost').textContent = weekC > 0 ? weekC.toFixed(4) + ' ' + CUR : '-';
+            document.getElementById('monthToken').textContent = fmt(monthT);
+            document.getElementById('monthCost').textContent = monthC > 0 ? monthC.toFixed(4) + ' ' + CUR : '-';
 
-            if(usage.length>0){
-                document.getElementById('chart').style.display='block';
-                document.getElementById('chartWeek').style.display='block';
-                document.getElementById('chartMonth').style.display='block';
-                document.getElementById('noData').style.display='none';
+            if (usage.length > 0) {
+                document.getElementById('chart').style.display = 'block';
+                document.getElementById('chartWeek').style.display = 'block';
+                document.getElementById('chartMonth').style.display = 'block';
+                document.getElementById('noData').style.display = 'none';
                 drawChart(usage);
                 drawWeekChart(usage);
                 drawMonthChart(usage);
-            }else{
-                document.getElementById('chart').style.display='none';
-                document.getElementById('chartWeek').style.display='none';
-                document.getElementById('chartMonth').style.display='none';
-                document.getElementById('noData').style.display='block';
+            } else {
+                document.getElementById('chart').style.display = 'none';
+                document.getElementById('chartWeek').style.display = 'none';
+                document.getElementById('chartMonth').style.display = 'none';
+                document.getElementById('noData').style.display = 'block';
             }
         });
-        window.addEventListener('resize',()=>{if(chart)chart.resize();if(chartWeek)chartWeek.resize();if(chartMonth)chartMonth.resize();});
+        window.addEventListener('resize', () => {
+            if (chart) chart.resize();
+            if (chartWeek) chartWeek.resize();
+            if (chartMonth) chartMonth.resize();
+        });
     </script>
 </body>
 </html>`;
