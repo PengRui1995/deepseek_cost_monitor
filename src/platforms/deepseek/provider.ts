@@ -6,16 +6,6 @@ import {
 } from '../types';
 
 // ====================================================================
-// 日志通道（模块级，所有 Provider 共享）
-// ====================================================================
-
-let _channel: vscode.OutputChannel | null = null;
-function _log(msg: string): void {
-    if (!_channel) _channel = vscode.window.createOutputChannel('LLM用量查询');
-    _channel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`);
-}
-
-// ====================================================================
 // DeepSeekProvider
 // ====================================================================
 
@@ -110,7 +100,6 @@ export class DeepSeekProvider implements PlatformProvider {
     async getUserSummary(): Promise<UserSummary | null> {
         const token = await this.getPlatformToken();
         if (!token) {
-            _log('未配置 Platform Token，跳过摘要查询');
             throw new Error('未配置平台 Token');
         }
 
@@ -124,8 +113,6 @@ export class DeepSeekProvider implements PlatformProvider {
         const biz = res.data?.data?.biz_data;
         if (!biz) throw new Error('摘要数据为空');
 
-        _log(`摘要: 充值${biz.normal_wallets?.[0]?.balance || '0'} + 赠送${biz.bonus_wallets?.[0]?.balance || '0'}, 本月花费${biz.monthly_costs?.[0]?.amount || '0'}`);
-
         return {
             normal_wallets: biz.normal_wallets || [],
             bonus_wallets: biz.bonus_wallets || [],
@@ -138,7 +125,6 @@ export class DeepSeekProvider implements PlatformProvider {
     async getUsage(startDate: string, endDate: string): Promise<UsageRecord[]> {
         const token = await this.getPlatformToken();
         if (!token) {
-            _log('未配置 Platform Token，跳过用量查询');
             return [];
         }
 
@@ -152,13 +138,10 @@ export class DeepSeekProvider implements PlatformProvider {
         };
 
         try {
-            _log(`请求 amount + cost: month=${month}, year=${year}`);
             const [amountRes, costRes] = await Promise.all([
                 this.platformClient.get('/api/v0/usage/amount', { headers, params: { month, year } }),
                 this.platformClient.get('/api/v0/usage/cost', { headers, params: { month, year } }),
             ]);
-
-            _log(`amount → HTTP ${amountRes.status}, cost → HTTP ${costRes.status}`);
 
             const amountDays = amountRes.data?.data?.biz_data?.days || [];
             const costDays = costRes.data?.data?.biz_data?.[0]?.days || costRes.data?.data?.biz_data?.days || [];
@@ -203,22 +186,12 @@ export class DeepSeekProvider implements PlatformProvider {
                 }
             }
 
-            _log(`→ 合并结果: ${records.length}条`);
-            if (records.length > 0) _channel?.show(true);
             return records;
 
-        } catch (err) {
-            if (axios.isAxiosError(err)) {
-                const status = err.response?.status || 'N/A';
-                const msg = err.response?.data?.error?.message || err.message || '';
-                _log(`→ HTTP ${status} ${msg.slice(0, 200)}`);
-            } else {
-                _log(`→ 网络异常: ${(err as Error).message || '未知错误'}`);
-            }
+        } catch {
+            // 用量 API 失败不影响余额显示
         }
 
-        _log('用量端点无数据');
-        _channel?.show(true);
         return [];
     }
 

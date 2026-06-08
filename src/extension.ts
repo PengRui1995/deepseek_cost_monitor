@@ -13,8 +13,8 @@ let dashboard: DashboardViewProvider;
 
 /** 所有平台的 WebView 元数据 */
 const PLATFORM_META: PlatformMeta[] = [
-    { id: 'deepseek', displayName: 'DeepSeek', loginCommand: 'deepseek-usage.loginPlatform', setTokenCommand: 'deepseek-usage.setToken' },
-    { id: 'glm', displayName: '智谱GLM', loginCommand: 'llm-usage.loginGLM', setTokenCommand: 'llm-usage.setGLMToken' },
+    { id: 'deepseek', displayName: 'DeepSeek', color: '#4F8FF7', loginCommand: 'deepseek-usage.loginPlatform', setTokenCommand: 'deepseek-usage.setToken' },
+    { id: 'glm', displayName: '智谱GLM', color: '#A78BFA', loginCommand: 'llm-usage.loginGLM', setTokenCommand: 'llm-usage.setGLMToken' },
 ];
 
 export function activate(context: vscode.ExtensionContext) {
