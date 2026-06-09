@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { DeepSeekAPI } from './api';
 import { GLMProvider } from './platforms/glm/provider';
+import { MimoProvider } from './platforms/mimo/provider';
 import { PlatformRegistry } from './platforms/registry';
 import { StatusBarManager } from './statusBar';
 import { DashboardViewProvider, PlatformMeta } from './dashboard';
@@ -15,6 +16,7 @@ let dashboard: DashboardViewProvider;
 const PLATFORM_META: PlatformMeta[] = [
     { id: 'deepseek', displayName: 'DeepSeek', color: '#4F8FF7', loginCommand: 'deepseek-usage.loginPlatform', setTokenCommand: 'deepseek-usage.setToken' },
     { id: 'glm', displayName: '智谱GLM', color: '#A78BFA', loginCommand: 'llm-usage.loginGLM', setTokenCommand: 'llm-usage.setGLMToken' },
+    { id: 'mimo', displayName: '小米MiMo', color: '#F97316', loginCommand: 'llm-usage.loginMimo', setTokenCommand: 'llm-usage.setMimoCookie' },
 ];
 
 export function activate(context: vscode.ExtensionContext) {
@@ -171,6 +173,47 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // ====== MiMo 命令 ======
+
+    // 设置 MiMo Cookie
+    context.subscriptions.push(
+        vscode.commands.registerCommand('llm-usage.setMimoCookie', async () => {
+            const mimo = registry.get('mimo') as MimoProvider;
+            const token = await vscode.window.showInputBox({
+                prompt: '请输入 MiMo Cookie（推荐使用"登录MiMo"命令自动提取）',
+                password: true,
+                ignoreFocusOut: true,
+                placeHolder: '粘贴完整 Cookie 字符串到此处',
+                validateInput: v => !v?.trim() ? 'Cookie 不能为空' : null
+            });
+            if (token) {
+                await mimo.setCookie(token.trim());
+                vscode.window.showInformationMessage('MiMo Cookie 已保存 ✅');
+                _switchToPlatform('mimo');
+                dashboard.notifyConfigChanged();
+            }
+        })
+    );
+
+    // 登录 MiMo 平台
+    context.subscriptions.push(
+        vscode.commands.registerCommand('llm-usage.loginMimo', async () => {
+            await _cdpLogin('mimo', '小米MiMo');
+        })
+    );
+
+    // 清除 MiMo Cookie
+    context.subscriptions.push(
+        vscode.commands.registerCommand('llm-usage.clearMimoToken', async () => {
+            const ok = await vscode.window.showWarningMessage('确定清除 MiMo Cookie？', '确定', '取消');
+            if (ok === '确定') {
+                const mimo = registry.get('mimo') as MimoProvider;
+                await mimo.clearCookie();
+                vscode.window.showInformationMessage('MiMo Cookie 已清除');
+            }
+        })
+    );
+
     // ====== 通用命令 ======
 
     // 切换平台（命令面板）
@@ -311,6 +354,8 @@ export function activate(context: vscode.ExtensionContext) {
                             await (provider as DeepSeekAPI).setPlatformToken(token);
                         } else if (platformId === 'glm') {
                             await (provider as GLMProvider).setJwt(token);
+                        } else if (platformId === 'mimo') {
+                            await (provider as MimoProvider).setCookie(token);
                         }
                         vscode.window.showInformationMessage(`✅ ${displayName} Token 已自动获取并保存！`);
                         _switchToPlatform(platformId);

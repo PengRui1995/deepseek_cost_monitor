@@ -2,7 +2,7 @@
 
 VSCode 扩展，帮助开发者在 VSCode 中实时查看多平台 AI API 余额与用量，无需登录官网。
 
-支持平台：**DeepSeek** · **智谱GLM**（可扩展更多）
+支持平台：**DeepSeek** · **智谱GLM** · **小米MiMo**（可扩展更多）
 
 ## 技术栈
 
@@ -26,8 +26,10 @@ src/
     ├── registry.ts           # PlatformRegistry：平台注册/切换/持久化
     ├── deepseek/
     │   └── provider.ts       # DeepSeekProvider：余额+用量+CSV
-    └── glm/
-        └── provider.ts       # GLMProvider：余额+账单+用量
+    ├── glm/
+    │   └── provider.ts       # GLMProvider：余额+账单+用量
+    └── mimo/
+        └── provider.ts       # MimoProvider：余额+Token Plan 用量
 ```
 
 ## 核心架构
@@ -60,6 +62,7 @@ interface PlatformProvider {
 |------|------|------|----------|----------|
 | **DeepSeek** | API Key + Platform Token | localStorage `userToken` | `GET /user/balance` | `GET /api/v0/usage/amount` |
 | **智谱GLM** | JWT Token（单一凭证） | cookie `bigmodel_token_production` | `GET /api/biz/account/query-customer-account-report` | `GET /api/monitor/usage/model-usage` |
+| **小米MiMo** | Cookie（小米账号 SSO） | 全部 cookie（含 HttpOnly） | `GET /api/v1/balance` | `GET /tokenPlan/usage` |
 
 ### 平台选择器
 
@@ -98,6 +101,9 @@ interface PlatformProvider {
 | `llm-usage.loginGLM` | GLM: 登录获取 Token（CDP） |
 | `llm-usage.clearGLMToken` | GLM: 清除 Token |
 | `llm-usage.switchPlatform` | 切换监控平台（命令面板） |
+| `llm-usage.setMimoCookie` | MiMo: 设置 Cookie |
+| `llm-usage.loginMimo` | MiMo: 登录获取 Cookie（CDP） |
+| `llm-usage.clearMimoToken` | MiMo: 清除 Cookie |
 
 ## 配置项
 
@@ -149,3 +155,5 @@ npm run lint      # ESLint 检查
 | CSP 阻止 ECharts CDN | 添加 nonce + `script-src` 白名单 |
 | Platform Token 返回 401 | Token 需从浏览器 LocalStorage 提取（非 API Key） |
 | GLM 余额 API 需 cookie | CDP 支持 cookie 提取，非 localStorage |
+| MiMo 需 HttpOnly cookie | CDP `Network.getCookies` 提取全部 cookie（含 HttpOnly） |
+| MiMo API 无公开文档 | 通过 CDP 网络嗅探 + JS Bundle 逆向分析发现端点 |

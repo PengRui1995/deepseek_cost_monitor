@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { PlatformProvider } from './types';
 import { DeepSeekProvider } from './deepseek/provider';
 import { GLMProvider } from './glm/provider';
+import { MimoProvider } from './mimo/provider';
 
 /**
  * 平台注册中心：管理所有平台 Provider，支持切换当前活跃平台
@@ -13,8 +14,10 @@ export class PlatformRegistry {
     constructor(context: vscode.ExtensionContext) {
         const ds = new DeepSeekProvider(context);
         const glm = new GLMProvider(context);
+        const mimo = new MimoProvider(context);
         this.providers.set(ds.id, ds);
         this.providers.set(glm.id, glm);
+        this.providers.set(mimo.id, mimo);
 
         // 默认活跃平台：从全局状态恢复，否则 DeepSeek
         this._activeId = context.globalState.get<string>('llmUsage.activePlatform', 'deepseek') || 'deepseek';

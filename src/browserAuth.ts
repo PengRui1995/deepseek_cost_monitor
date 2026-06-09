@@ -146,14 +146,24 @@ async function _waitForCDP(port: number, timeoutMs: number, loginUrl: string): P
 
 /** 通用 Token 提取：根据 CdpLoginConfig 从 localStorage 或 cookie 中提取凭证 */
 async function _extractTokenGeneric(wsUrl: string, timeoutMs: number, config: CdpLoginConfig): Promise<string | null> {
+    // 提取域名用于 Network 请求过滤
+    const domainHost = new URL(config.loginUrl).hostname;
+
+    // 特殊模式：credentialKey 为空 → 提取该域名下所有 cookie（用于 MiMo 等平台）
+    const extractAllCookies = config.credentialSource === 'cookie' && !config.credentialKey;
+
     // 构建注入到浏览器中的 JS 表达式
     const tokenParserExpr = config.tokenParser
         ? `(${config.tokenParser.toString()})(raw)`
         : 'raw';
 
-    // 根据凭证来源构建不同的提取逻辑
     let extractCode: string;
-    if (config.credentialSource === 'cookie') {
+    if (extractAllCookies) {
+        // 提取全部 document.cookie（非 HttpOnly），HttpOnly 的用 CDP Network.getCookies 补充
+        extractCode = `
+            var raw = document.cookie;
+        `;
+    } else if (config.credentialSource === 'cookie') {
         // 从 document.cookie 中提取指定名称的 cookie
         extractCode = `
             var raw = null;
@@ -172,21 +182,6 @@ async function _extractTokenGeneric(wsUrl: string, timeoutMs: number, config: Cd
             var raw = localStorage.getItem('${config.credentialKey}');
         `;
     }
-
-    const expression = `(function(){
-        try {
-            var href = window.location.href;
-            ${extractCode}
-            var token = null;
-            if (raw) {
-                try { token = ${tokenParserExpr}; } catch(e) { token = raw; }
-            }
-            return JSON.stringify({url: href, token: token || null});
-        } catch(e) { return JSON.stringify({url: '', token: null, err: e.message}); }
-    })()`;
-
-    // 提取域名用于 Network 请求过滤
-    const domainHost = new URL(config.loginUrl).hostname;
 
     return new Promise((resolve) => {
         const ws = new WebSocket(wsUrl);
@@ -214,7 +209,52 @@ async function _extractTokenGeneric(wsUrl: string, timeoutMs: number, config: Cd
             // 启用 Network 域——捕获所有 API 请求（用于调试）
             _send(ws, ++msgId, 'Network.enable');
 
-            // 启动轮询：每 2 秒检测一次 localStorage
+            // 如果是要提取全部 cookie（MiMo 模式），使用 Network.getCookies
+            if (extractAllCookies) {
+                // 使用 Network.getCookies 获取所有 cookie（含 HttpOnly）
+                const cookiePollTimer = setInterval(() => {
+                    const id = ++msgId;
+                    _send(ws, id, 'Network.getCookies', {
+                        urls: [`https://${domainHost}/`],
+                    });
+                    callbacks.set(id, (result) => {
+                        try {
+                            const cookies = result?.cookies || [];
+                            if (cookies.length > 0) {
+                                // 格式化为 Cookie header 字符串
+                                const cookieStr = cookies
+                                    .map((c: any) => `${c.name}=${c.value}`)
+                                    .join('; ');
+                                console.log(`[CDP] 提取到 ${cookies.length} 个 cookie`);
+                                finish(cookieStr);
+                            }
+                        } catch (e) {
+                            console.log(`[CDP] Cookie 提取失败: ${e}`);
+                        }
+                    });
+                }, 2000);
+                // 更新 timeout 清理
+                const origTimeout = timeout;
+                timeout = setTimeout(() => {
+                    clearInterval(cookiePollTimer);
+                    console.log('[CDP] Cookie 轮询超时');
+                    finish(null);
+                }, timeoutMs);
+                clearTimeout(origTimeout);
+            }
+
+            // 启动轮询：每 2 秒检测一次 localStorage/cookie
+            const expression = `(function(){
+                try {
+                    var href = window.location.href;
+                    ${extractCode}
+                    var token = null;
+                    if (raw) {
+                        try { token = ${tokenParserExpr}; } catch(e) { token = raw; }
+                    }
+                    return JSON.stringify({url: href, token: token || null});
+                } catch(e) { return JSON.stringify({url: '', token: null, err: e.message}); }
+            })()`;
             pollTimer = setInterval(() => {
                 const id = ++msgId;
                 _send(ws, id, 'Runtime.evaluate', {
